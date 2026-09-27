@@ -13737,7 +13737,6 @@ export function issueRoutes(
         reviewPolicySensitiveMutationRequested;
       let transactionalComment: Awaited<ReturnType<typeof svc.addComment>> | null =
         null;
-      let commentPersistedTransactionally = false;
       const transactionalCommentSourceTrust =
         commentBody &&
         shouldUseTransactionalIssueUpdate &&
@@ -13792,7 +13791,6 @@ export function issueRoutes(
                 },
                 tx,
               );
-              commentPersistedTransactionally = true;
             }
 
             if (decision && decisionId) {
@@ -14377,7 +14375,7 @@ export function issueRoutes(
         transactionalComment;
       let goalCommentSteered = false;
       let lostReviewPathRef: string | null = null;
-      if (commentBody && !commentPersistedTransactionally) {
+      if (commentBody) {
         const commentReferenceSummaryBefore =
           updateReferenceSummaryAfter ??
           (await issueReferencesSvc.listIssueReferenceSummary(issue.id));
