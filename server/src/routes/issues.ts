@@ -13729,17 +13729,31 @@ export function issueRoutes(
       });
       const decision =
         transition.decision && decisionId ? transition.decision : null;
-      let attachmentComment: Awaited<ReturnType<typeof svc.addComment>> | null =
-        null;
-      const attachmentCommentSourceTrust = commentAttachmentIds?.length
-        ? await sourceTrustForActorWrite(existing, actor)
-        : undefined;
       const shouldUseTransactionalIssueUpdate =
         Boolean(commentAttachmentIds?.length) ||
         Boolean(decision) ||
         shouldRelayStop ||
         persistReviewActivityTransactionally ||
         reviewPolicySensitiveMutationRequested;
+      let transactionalComment: Awaited<ReturnType<typeof svc.addComment>> | null =
+        null;
+      let commentPersistedTransactionally = false;
+      const transactionalCommentSourceTrust =
+        commentBody &&
+        shouldUseTransactionalIssueUpdate &&
+        actor.actorType === "agent"
+          ? await sourceTrustForActorWrite(
+              {
+                ...existing,
+                projectId:
+                  updateFields.projectId === undefined
+                    ? existing.projectId
+                    : (updateFields.projectId as string | null),
+                executionPolicy: nextExecutionPolicy,
+              },
+              actor,
+            )
+          : undefined;
       try {
         if (shouldUseTransactionalIssueUpdate) {
           issue = await db.transaction(async (tx) => {
@@ -13750,10 +13764,11 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
-            if (commentAttachmentIds?.length) {
-              // Reassignment, comment creation and upload binding commit together.
-              // An invalid or already-bound receipt rolls back the issue update.
-              attachmentComment = await svc.addComment(
+            if (commentBody) {
+              // Reassignment, stage decisions, and ordinary comment persistence
+              // commit together. A comment or decision failure rolls back the
+              // complete workflow transition, including the issue receipt.
+              transactionalComment = await svc.addComment(
                 id,
                 commentBody,
                 {
@@ -13764,14 +13779,20 @@ export function issueRoutes(
                   onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
                 },
                 {
-                  attachmentIds: commentAttachmentIds,
-                  clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
+                  ...(commentAttachmentIds?.length
+                    ? { attachmentIds: commentAttachmentIds }
+                    : {}),
+                  clientRequestId:
+                    actor.actorType === "user"
+                      ? commentClientRequestId
+                      : undefined,
                   mirrorToSlack: actor.actorType === "user",
                   authorizationReason: issueMutationAuthorizationReason,
-                  sourceTrust: attachmentCommentSourceTrust,
+                  sourceTrust: transactionalCommentSourceTrust,
                 },
                 tx,
               );
+              commentPersistedTransactionally = true;
             }
 
             if (decision && decisionId) {
@@ -14353,10 +14374,10 @@ export function issueRoutes(
       }
 
       let comment: Awaited<ReturnType<typeof svc.addComment>> | null =
-        attachmentComment;
+        transactionalComment;
       let goalCommentSteered = false;
       let lostReviewPathRef: string | null = null;
-      if (commentBody) {
+      if (commentBody && !commentPersistedTransactionally) {
         const commentReferenceSummaryBefore =
           updateReferenceSummaryAfter ??
           (await issueReferencesSvc.listIssueReferenceSummary(issue.id));
