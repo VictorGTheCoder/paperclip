@@ -18,7 +18,11 @@ vi.setConfig({ testTimeout: 30000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
 const mockIssueService = vi.hoisted(() => ({
+  assertCheckoutOwner: vi.fn(async () => ({ adoptedFromRunId: null })),
   getAncestors: vi.fn(),
   getById: vi.fn(),
   getByIdForUpdate: vi.fn(),
@@ -39,11 +43,10 @@ vi.mock("../services/index.js", () => ({
   }),
   accessService: () => ({
     canUser: vi.fn(),
+    decide: vi.fn(async () => ({ allowed: true })),
     hasPermission: vi.fn(),
   }),
-  agentService: () => ({
-    getById: vi.fn(),
-  }),
+  agentService: () => mockAgentService,
   companySkillService: () => ({
     completeTestRunForIssue: vi.fn(async () => null),
   }),
@@ -106,6 +109,18 @@ vi.mock("../services/index.js", () => ({
   }),
 }));
 
+// Agent writes pass the per-run cross-issue influence cap, which needs a real
+// persisted heartbeat run. It is unrelated to dependency wakes, so allow it.
+vi.mock("../services/cross-issue-influence-limit.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/cross-issue-influence-limit.js")>(
+    "../services/cross-issue-influence-limit.js",
+  );
+  return {
+    ...actual,
+    observeCrossIssueInfluence: vi.fn(async () => null),
+  };
+});
+
 vi.mock("../services/issue-dependency-wakeups.js", async () => {
   const actual = await vi.importActual<typeof import("../services/issue-dependency-wakeups.js")>(
     "../services/issue-dependency-wakeups.js",
@@ -117,21 +132,38 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   };
 });
 
-async function createApp() {
-  const emptyRows: unknown[] = [];
-  const whereResult = {
-    limit: vi.fn(async () => emptyRows),
-    then: async (resolve: (rows: unknown[]) => unknown) => resolve(emptyRows),
+const BOARD_ACTOR = {
+  type: "board",
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "local_implicit",
+  isInstanceAdmin: false,
+};
+
+function agentActor(agentId: string, runId: string) {
+  return { type: "agent", agentId, companyId: "company-1", runId, source: "agent_jwt" };
+}
+
+async function createApp(actor: Record<string, unknown> = BOARD_ACTOR, selectRows: unknown[] = []) {
+  // Every query-builder chain resolves to `selectRows` (no rows by default),
+  // whatever methods the route chains onto select/insert/update.
+  const emptyQuery = (): unknown => {
+    const chain: unknown = new Proxy(() => undefined, {
+      get: (_target, prop) =>
+        prop === "then"
+          ? (resolve: (rows: unknown[]) => unknown) => resolve(selectRows)
+          : () => chain,
+    });
+    return chain;
   };
-  const query: Record<string, unknown> = {};
-  query.innerJoin = vi.fn(() => query);
-  query.where = vi.fn(() => whereResult);
-  const routeDb = {
-    select: vi.fn(() => ({
-      from: vi.fn(() => query),
-    })),
-    transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
-  };
+  const routeDb: Record<string, unknown> = new Proxy({}, {
+    get: (_target, prop) =>
+      prop === "transaction"
+        ? async (callback: (tx: unknown) => Promise<unknown>) => callback(routeDb)
+        : prop === "then"
+          ? undefined
+          : () => emptyQuery(),
+  });
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -139,13 +171,7 @@ async function createApp() {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   app.use("/api", issueRoutes(routeDb as any, {} as any));
@@ -680,5 +706,92 @@ describe("issue dependency wakeups in issue routes", () => {
     expect(res.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  describe("assignee self-block on already-ready dependencies", () => {
+    const parentIssueId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childIssueId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const blockedTransitionAt = new Date("2026-09-28T21:10:00.000Z");
+    const assigneeRunId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const assigneeAgentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+    beforeEach(() => {
+      mockAgentService.getById.mockImplementation(async (id: string) => ({
+        id,
+        companyId: "company-1",
+        name: id,
+        role: "engineer",
+        status: "active",
+        permissions: {},
+      }));
+      mockIssueService.getById.mockResolvedValue(issueRecord({
+        id: parentIssueId,
+        identifier: "PAP-140",
+        status: "in_progress",
+        assigneeAgentId,
+        checkoutRunId: assigneeRunId,
+        executionRunId: assigneeRunId,
+      }));
+      mockIssueService.update.mockResolvedValue(issueRecord({
+        id: parentIssueId,
+        identifier: "PAP-140",
+        status: "blocked",
+        assigneeAgentId,
+        blockedTransitionAt,
+      }));
+      mockIssueService.getDependencyReadiness.mockResolvedValue({
+        issueId: parentIssueId,
+        blockerIssueIds: [childIssueId],
+        unresolvedBlockerIssueIds: [],
+        unresolvedBlockerCount: 0,
+        pendingFinalizeBlockerIssueIds: [],
+        allBlockersDone: true,
+        isDependencyReady: true,
+      });
+    });
+
+    it("does not wake the assignee when it repeatedly blocks itself on blockers that are already done", async () => {
+      const app = await createApp(agentActor(assigneeAgentId, assigneeRunId), [{ id: assigneeAgentId }]);
+
+      // Mirrors TFT-140: each self-block opens a new blocked cycle.
+      for (const minute of [10, 11, 12]) {
+        mockIssueService.update.mockResolvedValueOnce(issueRecord({
+          id: parentIssueId,
+          identifier: "PAP-140",
+          status: "blocked",
+          assigneeAgentId,
+          blockedTransitionAt: new Date(`2026-09-28T21:${minute}:00.000Z`),
+        }));
+        const res = await request(app)
+          .patch(`/api/issues/${parentIssueId}`)
+          .send({
+            status: "blocked",
+            unblockDescriptor: { owner: { agentId: assigneeAgentId }, action: "Wait for the board answer" },
+          });
+        expect(res.status).toBe(200);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(mockFindExistingIssueBlockersResolvedWakeForReadyState).not.toHaveBeenCalled();
+      expect(mockWakeup).not.toHaveBeenCalled();
+    });
+
+    it("still wakes the assignee exactly once when the board restores the block", async () => {
+      const res = await request(await createApp())
+        .patch(`/api/issues/${parentIssueId}`)
+        .send({
+          status: "blocked",
+          unblockDescriptor: { owner: "board", action: "Answer the pending question" },
+        });
+
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => {
+        expect(mockWakeup).toHaveBeenCalledWith(
+          assigneeAgentId,
+          expect.objectContaining({ reason: "issue_blockers_resolved" }),
+        );
+      });
+      expect(mockWakeup).toHaveBeenCalledTimes(1);
+    });
   });
 });
