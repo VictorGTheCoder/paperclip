@@ -52,7 +52,7 @@ import {
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
-import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
+import { DIRECT_NON_INVOKABLE_STATUSES, evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
@@ -3582,6 +3582,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       let latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+      if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
+        result.skipped += 1;
+        continue;
+      }
+
 
       const agent = await getAgent(agentId);
       const agentInvokable = agent && agent.companyId === issue.companyId
@@ -3629,11 +3634,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       if (await hasPendingWakeInteraction(issue.companyId, issue.id)) {
-        result.skipped += 1;
-        continue;
-      }
-
-      if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
         result.skipped += 1;
         continue;
       }
@@ -5178,6 +5178,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       const filters = [
         eq(issues.status, "blocked"),
         visibleIssueCondition(),
+        notInArray(agents.status, [...DIRECT_NON_INVOKABLE_STATUSES]),
         sql`${issues.assigneeAgentId} is not null`,
       ];
       if (opts?.companyId) filters.push(eq(issues.companyId, opts.companyId));
@@ -5200,6 +5201,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             totalCount: sql<number>`count(*) over()::int`,
           })
           .from(issueRelations)
+          .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
           .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
           .where(and(...filters))
           .orderBy(asc(issues.id))
@@ -5215,6 +5217,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           blockedTransitionAt: issues.blockedTransitionAt,
           totalCount: sql<number>`count(*) over()::int`,
         })
+        .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
         .from(issues)
         .where(and(...filters))
         .orderBy(asc(issues.id))
