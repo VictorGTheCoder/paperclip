@@ -7450,6 +7450,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const wakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
     expect(wakeups).toHaveLength(1);
   });
+
   it("suppresses stranded recovery before non-invokable escalation when a pause hold is active", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "todo",
@@ -7482,7 +7483,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(and(eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId)));
     expect(recoveryActions).toHaveLength(0);
   });
-
 
   it("re-enqueues recovery when the latest in-progress continuation made progress but left no live path", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
