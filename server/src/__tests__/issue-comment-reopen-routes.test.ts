@@ -2910,6 +2910,14 @@ describe.sequential("issue comment reopen routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "Approved for ship",
+      expect.anything(),
+      expect.objectContaining({ clientRequestId: undefined }),
+      mockTx,
+    );
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
@@ -2969,11 +2977,45 @@ describe.sequential("issue comment reopen routes", () => {
         lastDecisionOutcome: null,
       },
     };
-    mockIssueService.getById.mockResolvedValue(issue);
+    const persistedState = {
+      status: issue.status,
+      assigneeAgentId: issue.assigneeAgentId,
+      executionState: structuredClone(issue.executionState),
+      decisionRows: [] as Record<string, unknown>[],
+    };
+    let transactionState: typeof persistedState | null = null;
+    mockDb.transaction.mockImplementation(async (callback) => {
+      const stagedState = structuredClone(persistedState);
+      transactionState = stagedState;
+      try {
+        const result = await callback(mockTx);
+        Object.assign(persistedState, stagedState);
+        return result;
+      } finally {
+        transactionState = null;
+      }
+    });
     mockIssueService.update.mockImplementation(
-      async (_id: string, patch: Record<string, unknown>) =>
-        makeIssueUpdateReceipt(issue, patch),
+      async (_id: string, patch: Record<string, unknown>) => {
+        if (transactionState) {
+          if (typeof patch.status === "string") {
+            transactionState.status = patch.status;
+          }
+          if ("assigneeAgentId" in patch) {
+            transactionState.assigneeAgentId =
+              patch.assigneeAgentId as string | null;
+          }
+          if ("executionState" in patch) {
+            transactionState.executionState = patch.executionState;
+          }
+        }
+        return makeIssueUpdateReceipt(issue, patch);
+      },
     );
+    mockTxInsertValues.mockImplementation(async (row: Record<string, unknown>) => {
+      transactionState?.decisionRows.push(row);
+    });
+    mockIssueService.getById.mockResolvedValue(issue);
     mockIssueService.addComment.mockRejectedValueOnce(
       new HttpError(400, "synthetic comment persistence failure"),
     );
@@ -2987,13 +3029,11 @@ describe.sequential("issue comment reopen routes", () => {
       });
 
     expect(res.status).toBe(400);
-    expect(issue).toMatchObject({
+    expect(persistedState).toEqual({
       status: "in_review",
       assigneeAgentId: null,
-      executionState: expect.objectContaining({
-        status: "pending",
-        lastDecisionId: null,
-      }),
+      executionState: issue.executionState,
+      decisionRows: [],
     });
     expect(mockIssueService.addComment).toHaveBeenCalledWith(
       issue.id,
