@@ -187,6 +187,7 @@ import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
+  shouldWakeOnRestoredBlockedDependency,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
@@ -10768,14 +10769,15 @@ export function issueRoutes(
         }
       }
 
-      const restoredBlockedReadyDependency =
-        issue.status === "blocked" &&
-        issue.assigneeAgentId &&
-        (
-          existing.status !== "blocked" ||
-          Array.isArray(req.body.blockedByIssueIds) ||
-          existing.assigneeAgentId !== issue.assigneeAgentId
-        );
+      const restoredBlockedReadyDependency = shouldWakeOnRestoredBlockedDependency({
+        previousStatus: existing.status,
+        nextStatus: issue.status,
+        previousAssigneeAgentId: existing.assigneeAgentId,
+        nextAssigneeAgentId: issue.assigneeAgentId,
+        blockerSetEdited: Array.isArray(req.body.blockedByIssueIds),
+        actorType: actor.actorType,
+        actorAgentId: actor.agentId,
+      });
       if (restoredBlockedReadyDependency && typeof dependencyReadinessSvc.getDependencyReadiness === "function") {
         const readiness = await dependencyReadinessSvc.getDependencyReadiness(issue.id);
         const resolvedBlockerIssueId = readiness.blockerIssueIds[0] ?? null;

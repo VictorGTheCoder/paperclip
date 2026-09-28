@@ -114,6 +114,79 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "pi_local",
 ]);
 
+async function findAssigneeSelfBlockedCycleActivity(db: Db, input: {
+  companyId: string;
+  issueId: string;
+  assigneeAgentId: string;
+  blockedTransitionAt: Date | null;
+}) {
+  if (!input.blockedTransitionAt) return null;
+
+  const rows = await db
+    .select({ createdAt: activityLog.createdAt, details: activityLog.details })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.companyId, input.companyId),
+      eq(activityLog.entityType, "issue"),
+      eq(activityLog.entityId, input.issueId),
+      eq(activityLog.action, "issue.updated"),
+      eq(activityLog.actorType, "agent"),
+      eq(activityLog.agentId, input.assigneeAgentId),
+      sql`${activityLog.details} -> 'changes' -> 'status' ->> 'to' = 'blocked'`,
+    ))
+    .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+    .limit(20);
+
+  const expectedTransitionAt = input.blockedTransitionAt.getTime();
+  for (const row of rows) {
+    const changes = parseObject(row.details?.changes);
+    const transition = parseObject(changes.blockedTransitionAt);
+    const recordedTransitionAt = typeof transition.to === "string"
+      ? new Date(transition.to).getTime()
+      : Number.NaN;
+    if (recordedTransitionAt === expectedTransitionAt) return row.createdAt;
+  }
+  return null;
+}
+
+async function hasDependencyChangeAfter(db: Db, input: {
+  companyId: string;
+  issueId: string;
+  blockerIssueIds: string[];
+  after: Date;
+}) {
+  const blockerSetEdit = await db
+    .select({ id: activityLog.id })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.companyId, input.companyId),
+      eq(activityLog.entityType, "issue"),
+      eq(activityLog.entityId, input.issueId),
+      eq(activityLog.action, "issue.blockers_updated"),
+      gt(activityLog.createdAt, input.after),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (blockerSetEdit) return true;
+
+  if (input.blockerIssueIds.length === 0) return false;
+  const blockerBecameReady = await db
+    .select({ id: activityLog.id })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.companyId, input.companyId),
+      eq(activityLog.entityType, "issue"),
+      inArray(activityLog.entityId, input.blockerIssueIds),
+      eq(activityLog.action, "issue.updated"),
+      gt(activityLog.createdAt, input.after),
+      sql`${activityLog.details} -> 'changes' -> 'status' ->> 'to' = 'done'`,
+      sql`COALESCE(${activityLog.details} -> 'changes' -> 'status' ->> 'from', '') <> 'done'`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return Boolean(blockerBecameReady);
+}
+
 // GGU-809: when a stranded `in_progress` issue would otherwise hit the
 // `isRepeatedProductiveContinuationRecovery` escalation path, exempt the
 // escalation if the assignee posted a comment or attachment within this window.
@@ -5157,6 +5230,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       existingWakeSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
+      selfBlockedSkipped: 0,
       pauseHoldSkipped: 0,
       notReadySkipped: 0,
       candidateLimitSkipped: 0,
@@ -5278,6 +5352,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           !resolvedBlockerIssueId
         ) {
           result.notReadySkipped += 1;
+          continue;
+        }
+
+        const selfBlockedAt = await findAssigneeSelfBlockedCycleActivity(db, {
+          companyId,
+          issueId: candidate.id,
+          assigneeAgentId: agentId,
+          blockedTransitionAt: candidate.blockedTransitionAt,
+        });
+        if (selfBlockedAt && !await hasDependencyChangeAfter(db, {
+          companyId,
+          issueId: candidate.id,
+          blockerIssueIds: readiness.blockerIssueIds,
+          after: selfBlockedAt,
+        })) {
+          result.selfBlockedSkipped += 1;
           continue;
         }
 
@@ -5454,6 +5544,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       dependencyWakeExistingSkipped: 0,
       dependencyWakeLivePathSkipped: 0,
       dependencyWakeInteractionSkipped: 0,
+      dependencyWakeSelfBlockedSkipped: 0,
       dependencyWakePauseHoldSkipped: 0,
       dependencyWakeNotReadySkipped: 0,
       dependencyWakeCandidateLimitSkipped: 0,
@@ -5473,6 +5564,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     result.dependencyWakeExistingSkipped = dependencyWakeBackstop.existingWakeSkipped;
     result.dependencyWakeLivePathSkipped = dependencyWakeBackstop.livePathSkipped;
     result.dependencyWakeInteractionSkipped = dependencyWakeBackstop.interactionSkipped;
+    result.dependencyWakeSelfBlockedSkipped = dependencyWakeBackstop.selfBlockedSkipped;
     result.dependencyWakePauseHoldSkipped = dependencyWakeBackstop.pauseHoldSkipped;
     result.dependencyWakeNotReadySkipped = dependencyWakeBackstop.notReadySkipped;
     result.dependencyWakeCandidateLimitSkipped = dependencyWakeBackstop.candidateLimitSkipped;

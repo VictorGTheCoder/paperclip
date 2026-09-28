@@ -5,6 +5,7 @@ import {
   buildIssueBlockersResolvedWakeStateKey,
   buildIssueBlockersResolvedWakeStateKeyWithoutCycle,
   findExistingIssueBlockersResolvedWakeForReadyState,
+  shouldWakeOnRestoredBlockedDependency,
 } from "./issue-dependency-wakeups.js";
 
 const dependentIssueId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -89,6 +90,54 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
         blockerIssueIds: [blockerIssueId],
       }),
     );
+  });
+});
+
+describe("shouldWakeOnRestoredBlockedDependency", () => {
+  const base = {
+    previousStatus: "in_progress",
+    nextStatus: "blocked",
+    previousAssigneeAgentId: "agent-1",
+    nextAssigneeAgentId: "agent-1",
+    blockerSetEdited: false,
+    actorType: "user" as const,
+    actorAgentId: null,
+  };
+
+  it("does not wake the assignee that self-blocked over already-resolved blockers", () => {
+    expect(shouldWakeOnRestoredBlockedDependency({
+      ...base,
+      actorType: "agent",
+      actorAgentId: "agent-1",
+    })).toBe(false);
+  });
+
+  it("wakes when the board or another agent restores a blocked dependency", () => {
+    expect(shouldWakeOnRestoredBlockedDependency(base)).toBe(true);
+    expect(shouldWakeOnRestoredBlockedDependency({
+      ...base,
+      actorType: "agent",
+      actorAgentId: "agent-2",
+    })).toBe(true);
+  });
+
+  it("preserves a wake for an explicit blocker-set edit or assignee change by another actor", () => {
+    expect(shouldWakeOnRestoredBlockedDependency({
+      ...base,
+      previousStatus: "blocked",
+      blockerSetEdited: true,
+    })).toBe(true);
+    expect(shouldWakeOnRestoredBlockedDependency({
+      ...base,
+      previousStatus: "blocked",
+      previousAssigneeAgentId: "agent-2",
+    })).toBe(true);
+  });
+
+  it("does not wake for updates that are not a restored blocked dependency", () => {
+    expect(shouldWakeOnRestoredBlockedDependency({ ...base, nextStatus: "in_review" })).toBe(false);
+    expect(shouldWakeOnRestoredBlockedDependency({ ...base, nextAssigneeAgentId: null })).toBe(false);
+    expect(shouldWakeOnRestoredBlockedDependency({ ...base, previousStatus: "blocked" })).toBe(false);
   });
 });
 

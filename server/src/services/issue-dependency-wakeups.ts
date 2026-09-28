@@ -38,6 +38,38 @@ export type IssueBlockersResolvedReadyStateInput = {
   blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
 };
 
+export type RestoredBlockedDependencyWakePolicyInput = {
+  previousStatus: string;
+  nextStatus: string;
+  previousAssigneeAgentId: string | null;
+  nextAssigneeAgentId: string | null;
+  blockerSetEdited: boolean;
+  actorType: "agent" | "user" | "system";
+  actorAgentId: string | null;
+};
+
+/**
+ * Restoring a blocked issue with resolved dependencies is a wake signal when
+ * the board or another agent makes that decision. When the assignee agent
+ * blocks its own issue, the agent is declaring that it cannot proceed; waking
+ * it immediately for the same already-ready dependencies creates a re-block
+ * loop.
+ */
+export function shouldWakeOnRestoredBlockedDependency(
+  input: RestoredBlockedDependencyWakePolicyInput,
+): boolean {
+  const isRestoredBlockedDependency = input.nextStatus === "blocked" && Boolean(input.nextAssigneeAgentId) && (
+    input.previousStatus !== "blocked" ||
+    input.blockerSetEdited ||
+    input.previousAssigneeAgentId !== input.nextAssigneeAgentId
+  );
+  if (!isRestoredBlockedDependency) return false;
+
+  const assigneeSelfBlocked = input.actorType === "agent" &&
+    input.actorAgentId === input.nextAssigneeAgentId;
+  return !assigneeSelfBlocked;
+}
+
 /**
  * Canonical blocked-cycle stamp for the dependency-ready state key.
  * `blockedTransitionAt` is UTC ISO-8601, or `none` when the dependent has no
