@@ -585,6 +585,7 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     });
   });
 
+
   it.each(["paused", "terminated", "pending_approval"] as const)(
     "skips resolved-dependency backstop candidates whose assignee is %s",
     async (assigneeStatus) => {
@@ -657,7 +658,6 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     expect(wakes).toHaveLength(1);
     expect(wakes[0]?.idempotencyKey).toBe(stateKey);
   });
-
 
   it("retries a resolved dependency wake when the prior wake was skipped as stale", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
