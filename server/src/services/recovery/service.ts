@@ -52,7 +52,7 @@ import {
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
-import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
+import { DIRECT_NON_INVOKABLE_STATUSES, evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
@@ -5179,6 +5179,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         eq(issues.status, "blocked"),
         visibleIssueCondition(),
         sql`${issues.assigneeAgentId} is not null`,
+        notInArray(agents.status, [...DIRECT_NON_INVOKABLE_STATUSES]),
       ];
       if (opts?.companyId) filters.push(eq(issues.companyId, opts.companyId));
       if (afterIssueId) filters.push(gt(issues.id, afterIssueId));
@@ -5201,6 +5202,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           })
           .from(issueRelations)
           .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+          .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
           .where(and(...filters))
           .orderBy(asc(issues.id))
           .limit(RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT);
@@ -5216,6 +5218,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           totalCount: sql<number>`count(*) over()::int`,
         })
         .from(issues)
+        .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
         .where(and(...filters))
         .orderBy(asc(issues.id))
         .limit(RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT);

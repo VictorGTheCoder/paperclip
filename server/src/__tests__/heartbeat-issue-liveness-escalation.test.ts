@@ -585,6 +585,80 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     });
   });
 
+
+  it.each(["paused", "terminated", "pending_approval"] as const)(
+    "skips resolved-dependency backstop candidates whose assignee is %s",
+    async (assigneeStatus) => {
+      const { companyId, agentId, blockedIssueId } =
+        await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await db.update(agents).set({ status: assigneeStatus }).where(eq(agents.id, agentId));
+      const heartbeat = heartbeatService(db);
+
+      const firstPass = await heartbeat.reconcileIssueGraphLiveness();
+      const secondPass = await heartbeat.reconcileIssueGraphLiveness();
+
+      expect(firstPass.dependencyWakeBackstopChecked).toBe(0);
+      expect(firstPass.dependencyWakesHealed).toBe(0);
+      expect(secondPass.dependencyWakeBackstopChecked).toBe(0);
+      expect(secondPass.dependencyWakesHealed).toBe(0);
+
+      const wakes = await db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+          ),
+        );
+      expect(wakes).toHaveLength(0);
+      expect(firstPass.dependencyWakeIssueIds).not.toContain(blockedIssueId);
+      expect(secondPass.dependencyWakeIssueIds).not.toContain(blockedIssueId);
+    },
+  );
+
+  it("reconciles exactly once after a paused dependency assignee becomes invokable", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const heartbeat = heartbeatService(db);
+
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+
+    const pausedPass = await heartbeat.reconcileIssueGraphLiveness();
+    expect(pausedPass.dependencyWakeBackstopChecked).toBe(0);
+    expect(pausedPass.dependencyWakesHealed).toBe(0);
+
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+
+    const resumedPass = await heartbeat.reconcileIssueGraphLiveness();
+    expect(resumedPass.dependencyWakesHealed).toBe(1);
+    expect(resumedPass.dependencyWakeIssueIds).toEqual([blockedIssueId]);
+
+    await heartbeat.drainActiveRunExecutions();
+
+    const stablePass = await heartbeat.reconcileIssueGraphLiveness();
+    expect(stablePass.dependencyWakesHealed).toBe(0);
+
+    const stateKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerIssueId],
+    });
+    const wakes = await db
+      .select({
+        id: agentWakeupRequests.id,
+        idempotencyKey: agentWakeupRequests.idempotencyKey,
+      })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+        ),
+      );
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]?.idempotencyKey).toBe(stateKey);
+  });
+
   it("retries a resolved dependency wake when the prior wake was skipped as stale", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
