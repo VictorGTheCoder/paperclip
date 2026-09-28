@@ -3582,11 +3582,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       let latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+
       if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
         result.skipped += 1;
         continue;
       }
-
 
       const agent = await getAgent(agentId);
       const agentInvokable = agent && agent.companyId === issue.companyId
@@ -5178,8 +5178,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       const filters = [
         eq(issues.status, "blocked"),
         visibleIssueCondition(),
-        notInArray(agents.status, [...DIRECT_NON_INVOKABLE_STATUSES]),
         sql`${issues.assigneeAgentId} is not null`,
+        notInArray(agents.status, [...DIRECT_NON_INVOKABLE_STATUSES]),
       ];
       if (opts?.companyId) filters.push(eq(issues.companyId, opts.companyId));
       if (afterIssueId) filters.push(gt(issues.id, afterIssueId));
@@ -5201,8 +5201,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             totalCount: sql<number>`count(*) over()::int`,
           })
           .from(issueRelations)
-          .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
           .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+          .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
           .where(and(...filters))
           .orderBy(asc(issues.id))
           .limit(RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT);
@@ -5217,8 +5217,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           blockedTransitionAt: issues.blockedTransitionAt,
           totalCount: sql<number>`count(*) over()::int`,
         })
-        .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
         .from(issues)
+        .innerJoin(agents, eq(agents.id, issues.assigneeAgentId))
         .where(and(...filters))
         .orderBy(asc(issues.id))
         .limit(RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT);
