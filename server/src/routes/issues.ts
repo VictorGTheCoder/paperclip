@@ -13729,8 +13729,12 @@ export function issueRoutes(
       });
       const decision =
         transition.decision && decisionId ? transition.decision : null;
+      const commentWithAdapterOverrides = Boolean(
+        commentBody && updateFields.assigneeAdapterOverrides !== undefined,
+      );
       const shouldUseTransactionalIssueUpdate =
         Boolean(commentAttachmentIds?.length) ||
+        commentWithAdapterOverrides ||
         Boolean(decision) ||
         shouldRelayStop ||
         persistReviewActivityTransactionally ||
