@@ -31,10 +31,11 @@ export async function deliverAgentUnblockNotification(input: {
     contextSnapshot: { wakeReason: "issue_unblock_requested"; issueId: string; taskId: string };
   }) => Promise<unknown>;
   markNotified: (notifiedAt: Date) => Promise<unknown>;
+  pendingDecision?: boolean;
   now?: () => Date;
 }) {
   const { issue } = input;
-  if (!isProspectiveBlockedTransition(issue) || !issue.unblockDescriptor || issue.blockedOwnerNotifiedAt) {
+  if (!isProspectiveBlockedTransition(issue) || !issue.unblockDescriptor || issue.blockedOwnerNotifiedAt || input.pendingDecision) {
     return false;
   }
 

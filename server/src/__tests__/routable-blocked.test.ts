@@ -51,6 +51,20 @@ describe("routable blocked notifications", () => {
     expect(markNotified).not.toHaveBeenCalled();
   });
 
+  it("does not wake an unblock owner while a decision on the issue is pending", async () => {
+    const wakeup = vi.fn(async () => undefined);
+    const markNotified = vi.fn(async () => undefined);
+
+    await expect(deliverAgentUnblockNotification({
+      issue: blockedIssue(),
+      wakeup,
+      markNotified,
+      pendingDecision: true,
+    })).resolves.toBe(false);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(markNotified).not.toHaveBeenCalled();
+  });
+
   it("deduplicates one transition and notifies again after a blocked flap", async () => {
     const wakeup = vi.fn(async () => undefined);
     const markNotified = vi.fn(async () => undefined);

@@ -9723,6 +9723,7 @@ export function issueRoutes(
       }
     }
     const enteringBlocked = existing.status !== "blocked" && updateFields.status === "blocked";
+    let pendingDecisionOnBlockedTransition = false;
     if (enteringBlocked) {
       const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
         ? [...new Set(req.body.blockedByIssueIds as string[])]
@@ -9746,6 +9747,7 @@ export function issueRoutes(
           eq(approvals.status, "pending"),
         )).limit(1).then((rows) => rows[0] ?? null),
       ]);
+      pendingDecisionOnBlockedTransition = Boolean(pendingInteraction || pendingApproval);
       if (!hasUnresolvedBlocker && !pendingInteraction && !pendingApproval && !descriptor) {
         res.status(422).json({ error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor" });
         return;
@@ -10028,6 +10030,7 @@ export function issueRoutes(
       await deliverAgentUnblockNotification({
         issue: blockedIssue,
         wakeup: heartbeat.wakeup,
+        pendingDecision: pendingDecisionOnBlockedTransition,
         markNotified: async (blockedOwnerNotifiedAt) => {
           ownerNotifiedAt = blockedOwnerNotifiedAt;
         },

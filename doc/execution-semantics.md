@@ -499,6 +499,8 @@ A healthy `blocked` issue has an explicit waiting path:
 
 A blocker chain is covered only when its unresolved leaf is live or explicitly waiting. An intermediate `blocked` issue does not make the chain healthy by itself.
 
+If a blocked transition already has a pending issue interaction or linked approval, that decision owns the next move. Paperclip does not send an `issue_unblock_requested` wake to the descriptor's agent owner until the decision resolves through its normal continuation path. This prevents an agent waiting for input from repeatedly reopening and reblocking the same issue.
+
 A `blocked` issue is stalled when the unresolved blocker leaf has no active run, queued wake, typed participant, pending interaction or approval, user owner, external owner/action, or recovery action. In that case the parent should show the first stalled leaf instead of presenting the dependency as calmly covered.
 
 ## 9. Crash and Restart Recovery
