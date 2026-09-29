@@ -440,9 +440,12 @@ back the transition and decision instead of returning an error after advancing
 the workflow. Comment reference indexing, activity publication, and assignee
 wakeups run only after that transaction commits.
 
-Clients should retry with the same `commentClientRequestId` receipt key. A
-replayed request is bounded by the existing stage/receipt checks and must not
-insert a second comment or decision.
+Board and user clients should send a stable `commentClientRequestId`. If the
+transaction fails, they can retry with that same receipt key. After a successful
+decision, a replay is rejected with HTTP 422 by the completed-stage check; it
+does not return a second success or insert another comment or decision. Agent
+requests do not send `commentClientRequestId`; the completed-stage check prevents
+them from applying the decision again.
 
 ## Legacy controller ownership
 
