@@ -1683,6 +1683,126 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     );
   });
 
+  it("wakes the pending governed review participant when review recovery is restored", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const stageId = randomUUID();
+    await db
+      .update(issues)
+      .set({
+        status: "blocked",
+        assigneeAgentId: managerId,
+        executionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [{
+            id: stageId,
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [{ id: randomUUID(), type: "agent", agentId: managerId, userId: null }],
+          }],
+        },
+        executionState: {
+          status: "pending",
+          currentStageId: stageId,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: managerId, userId: null },
+          returnAssignee: { type: "agent", agentId: coderId, userId: null },
+          reviewRequest: null,
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+      })
+      .where(eq(issues.id, sourceIssueId));
+
+    const recoveryActionSvc = issueRecoveryActionService(db);
+    const action = await recoveryActionSvc.upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "stranded_assigned_issue",
+      ownerType: "board",
+      ownerAgentId: null,
+      previousOwnerAgentId: managerId,
+      returnOwnerAgentId: managerId,
+      cause: "execution_review_participant_recovery",
+      fingerprint: `source_scoped_recovery:${companyId}:${sourceIssueId}:execution_review_participant_recovery`,
+      evidence: {
+        latestRunId: randomUUID(),
+        previousStatus: "in_review",
+        latestIssueStatus: "in_review",
+        retryReason: "execution_review_participant_recovery",
+      },
+      nextAction: "Restore the review participant execution path.",
+      wakePolicy: {
+        type: "board_escalation",
+        reason: "execution_review_participant_recovery",
+        preservesSourceAssignee: true,
+      },
+    });
+
+    const enqueueRecoveryActionWakeup = vi.fn(async () => null);
+    const app = createApp(undefined, {
+      recoveryActionEnqueueWakeup: enqueueRecoveryActionWakeup,
+    });
+
+    const resolved = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "in_review",
+        resolutionNote: "Reviewer capacity is available again.",
+      })
+      .expect(200);
+
+    expect(resolved.body.issue).toMatchObject({
+      id: sourceIssueId,
+      status: "in_review",
+      assigneeAgentId: managerId,
+      activeRecoveryAction: null,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: managerId },
+      },
+    });
+    expect(enqueueRecoveryActionWakeup).toHaveBeenCalledTimes(1);
+    expect(enqueueRecoveryActionWakeup).toHaveBeenCalledWith(
+      managerId,
+      expect.objectContaining({
+        reason: "execution_review_participant_recovery",
+        idempotencyKey: `issue-recovery-review:${action.id}:${stageId}`,
+        payload: expect.objectContaining({
+          issueId: sourceIssueId,
+          recoveryActionId: action.id,
+          currentStageId: stageId,
+          currentStageType: "review",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: sourceIssueId,
+          wakeReason: "execution_review_participant_recovery",
+          retryReason: "execution_review_participant_recovery",
+          source: "issue.execution_review_recovery",
+          currentStageId: stageId,
+        }),
+      }),
+    );
+
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "in_review",
+        resolutionNote: "Duplicate delivery must converge.",
+      })
+      .expect(404);
+
+    expect(enqueueRecoveryActionWakeup).toHaveBeenCalledTimes(1);
+  });
+
   it("does not enqueue a restored wake when todo status and assignee are unchanged", async () => {
     const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
     await db

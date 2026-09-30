@@ -7103,6 +7103,54 @@ export function issueRoutes(
       }
     }
 
+    const restoredExecutionState = parseIssueExecutionState(result.issue.executionState);
+    const restoredReviewParticipantAgentId =
+      sourceIssueStatus === "in_review" &&
+      result.recoveryAction.cause === "execution_review_participant_recovery" &&
+      restoredExecutionState?.status === "pending" &&
+      restoredExecutionState.currentParticipant?.type === "agent"
+        ? restoredExecutionState.currentParticipant.agentId
+        : null;
+
+    if (
+      restoredReviewParticipantAgentId &&
+      existing.status !== result.issue.status
+    ) {
+      try {
+        await enqueueRecoveryActionWakeup(restoredReviewParticipantAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "execution_review_participant_recovery",
+          idempotencyKey:
+            `issue-recovery-review:${result.recoveryAction.id}:${restoredExecutionState?.currentStageId ?? "pending"}`,
+          payload: {
+            issueId: result.issue.id,
+            recoveryActionId: result.recoveryAction.id,
+            mutation: "recovery_action_resolution",
+            currentStageId: restoredExecutionState?.currentStageId ?? null,
+            currentStageType: restoredExecutionState?.currentStageType ?? null,
+          },
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: result.issue.id,
+            taskId: result.issue.id,
+            wakeReason: "execution_review_participant_recovery",
+            retryReason: "execution_review_participant_recovery",
+            source: "issue.execution_review_recovery",
+            recoveryActionId: result.recoveryAction.id,
+            currentStageId: restoredExecutionState?.currentStageId ?? null,
+            currentStageType: restoredExecutionState?.currentStageType ?? null,
+          },
+        });
+      } catch (err) {
+        logger.warn(
+          { err, issueId: result.issue.id, agentId: restoredReviewParticipantAgentId },
+          "failed to wake review participant after recovery action restored governed stage",
+        );
+      }
+    }
+
     res.json({
       issue: {
         ...result.issue,
