@@ -98,6 +98,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "issues.getSubtree": ["issue.subtree.read"],
   "issues.requestWakeup": ["issues.wakeup"],
   "issues.requestWakeups": ["issues.wakeup"],
+  "issues.review.transferOwner": ["issues.review.transfer_owner"],
   "issue.comments.create": ["issue.comments.create"],
   "issue.comments.create_human_attributed": ["issue.comments.create_human_attributed"],
   "issue.interactions.create": ["issue.interactions.create"],

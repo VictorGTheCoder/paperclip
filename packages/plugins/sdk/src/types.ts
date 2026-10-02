@@ -1260,6 +1260,30 @@ export interface PluginIssueWakeupBatchResult {
   runId: string | null;
 }
 
+/**
+ * Result of `ctx.issues.transferReviewOwner`. `outcome` is `"noop"` when the
+ * issue already belongs to the target (duplicate delivery converges).
+ */
+export interface PluginReviewOwnerTransferResult {
+  outcome: "transferred" | "noop";
+  previousOwnerAgentId: string;
+  ownerAgentId: string;
+  stageId: string;
+  changesRequestedCount: number;
+  issue: Issue;
+}
+
+export interface PluginReviewOwnerTransferInput extends PluginIssueMutationActor {
+  issueId: string;
+  companyId: string;
+  /** Agent that takes over the repair pass and receives later changes-requested hand-backs. */
+  targetAgentId: string;
+  /** Optional compare-and-set guard: the owner the plugin believes is current. */
+  expectedCurrentOwnerAgentId?: string | null;
+  /** Free-text reason recorded on the activity entry. */
+  reason?: string | null;
+}
+
 export interface PluginIssueRunSummary {
   id: string;
   issueId: string | null;
@@ -1396,6 +1420,7 @@ export interface PluginIssueAttachmentContent {
  * - `issues.update` for update
  * - `issues.checkout` for checkout ownership assertions
  * - `issues.wakeup` for assignment wakeup requests
+ * - `issues.review.transfer_owner` for `transferReviewOwner`
  * - `issues.orchestration.read` for orchestration summaries
  * - `issue.comments.read` for `listComments`
  * - `issue.comments.create` for `createComment`
@@ -1505,6 +1530,24 @@ export interface PluginIssuesClient {
       idempotencyKeyPrefix?: string | null;
     } & PluginIssueMutationActor,
   ): Promise<PluginIssueWakeupBatchResult[]>;
+  /**
+   * Transfer the repair owner of an issue in a native review repair pass
+   * (`executionState.status = "changes_requested"` on a review stage) to
+   * another agent of the same company. Only the assignee and
+   * `executionState.returnAssignee` change; the stage, decision history,
+   * `changesRequestedCount` and `maxReviewRounds` are preserved, so later
+   * changes-requested decisions route to the new owner and the round cap keeps
+   * counting.
+   *
+   * Fails closed with a stable `code` (see `REVIEW_OWNER_TRANSFER_REFUSAL_CODES`
+   * in `@paperclipai/shared`) — e.g. `human_participant_pending`,
+   * `review_decision_pending`, `owner_run_active`. Repeating a completed
+   * transfer returns `outcome: "noop"`. It never wakes an agent; call
+   * `requestWakeup` afterwards if the new owner should start.
+   *
+   * Requires `issues.review.transfer_owner`.
+   */
+  transferReviewOwner(input: PluginReviewOwnerTransferInput): Promise<PluginReviewOwnerTransferResult>;
   listComments(issueId: string, companyId: string): Promise<IssueComment[]>;
   /**
    * Post a comment on an issue.

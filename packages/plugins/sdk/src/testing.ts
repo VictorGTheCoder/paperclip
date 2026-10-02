@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import {
+  formatReviewOwnerTransferRefusal,
+  planReviewOwnerTransfer,
+  pluginOperationIssueOriginKind,
+} from "@paperclipai/shared";
 import type {
   PaperclipPluginManifestV1,
   PluginCapability,
@@ -1700,6 +1704,51 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           results.push({ issueId, queued: true, runId: randomUUID() });
         }
         return results;
+      },
+      async transferReviewOwner(input) {
+        requireCapability(manifest, capabilitySet, "issues.review.transfer_owner");
+        const record = issues.get(input.issueId);
+        if (!isInCompany(record, input.companyId)) throw new Error(`Issue not found: ${input.issueId}`);
+        // Same pure decision the host uses; the host additionally refuses on
+        // in-flight old-owner runs, scheduled retries and active recovery
+        // actions, which the in-memory harness does not model.
+        const plan = planReviewOwnerTransfer({
+          issue: record,
+          targetAgentId: input.targetAgentId,
+          expectedCurrentOwnerAgentId: input.expectedCurrentOwnerAgentId ?? null,
+        });
+        if (!plan.ok) throw new Error(formatReviewOwnerTransferRefusal(plan.code, plan.message));
+        const summary = {
+          previousOwnerAgentId: plan.summary.previousOwnerAgentId,
+          ownerAgentId: plan.summary.ownerAgentId,
+          stageId: plan.summary.stageId,
+          changesRequestedCount: plan.summary.changesRequestedCount,
+        };
+        if (plan.outcome === "noop") return { outcome: "noop", ...summary, issue: record };
+        const target = agents.get(input.targetAgentId);
+        if (!isInCompany(target, input.companyId)) {
+          throw new Error(formatReviewOwnerTransferRefusal("target_agent_not_found", "Target agent not found in this company"));
+        }
+        if (target.status === "terminated" || target.status === "pending_approval") {
+          throw new Error(formatReviewOwnerTransferRefusal(
+            "target_agent_not_assignable",
+            `Target agent is ${target.status}`,
+          ));
+        }
+        const updated: Issue = {
+          ...record,
+          assigneeAgentId: plan.patch.assigneeAgentId,
+          assigneeUserId: null,
+          executionState: plan.patch.executionState as unknown as Issue["executionState"],
+          // Reassignment releases the previous owner's run locks, as on the host.
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          updatedAt: new Date(),
+        };
+        issues.set(updated.id, updated);
+        return { outcome: "transferred", ...summary, issue: updated };
       },
       async listComments(issueId, companyId) {
         requireCapability(manifest, capabilitySet, "issue.comments.read");

@@ -243,6 +243,7 @@ export interface HostServices {
     getSubtree(params: WorkerToHostMethods["issues.getSubtree"][0]): Promise<WorkerToHostMethods["issues.getSubtree"][1]>;
     requestWakeup(params: WorkerToHostMethods["issues.requestWakeup"][0]): Promise<WorkerToHostMethods["issues.requestWakeup"][1]>;
     requestWakeups(params: WorkerToHostMethods["issues.requestWakeups"][0]): Promise<WorkerToHostMethods["issues.requestWakeups"][1]>;
+    transferReviewOwner(params: WorkerToHostMethods["issues.review.transferOwner"][0]): Promise<WorkerToHostMethods["issues.review.transferOwner"][1]>;
     getOrchestrationSummary(params: WorkerToHostMethods["issues.summaries.getOrchestration"][0]): Promise<WorkerToHostMethods["issues.summaries.getOrchestration"][1]>;
     listComments(params: WorkerToHostMethods["issues.listComments"][0]): Promise<WorkerToHostMethods["issues.listComments"][1]>;
     createComment(params: WorkerToHostMethods["issues.createComment"][0]): Promise<WorkerToHostMethods["issues.createComment"][1]>;
@@ -464,6 +465,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "issues.getSubtree": "issue.subtree.read",
   "issues.requestWakeup": "issues.wakeup",
   "issues.requestWakeups": "issues.wakeup",
+  "issues.review.transferOwner": "issues.review.transfer_owner",
   "issues.summaries.getOrchestration": "issues.orchestration.read",
   "issues.listComments": "issue.comments.read",
   "issues.createComment": "issue.comments.create",
@@ -911,6 +913,9 @@ export function createHostClientHandlers(
     }),
     "issues.requestWakeups": gated("issues.requestWakeups", async (params) => {
       return services.issues.requestWakeups(params);
+    }),
+    "issues.review.transferOwner": gated("issues.review.transferOwner", async (params) => {
+      return services.issues.transferReviewOwner(params);
     }),
     "issues.summaries.getOrchestration": gated("issues.summaries.getOrchestration", async (params) => {
       return services.issues.getOrchestrationSummary(params);

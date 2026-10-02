@@ -34,6 +34,7 @@ import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { issueService } from "./issues.js";
+import { issueReviewOwnerTransferService } from "./issue-review-owner-transfer.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
@@ -748,6 +749,7 @@ export function buildHostServices(
   const projects = projectService(db);
   const executionWorkspaces = executionWorkspaceService(db);
   const issues = issueService(db);
+  const reviewOwnerTransfer = issueReviewOwnerTransferService(db);
   const documents = documentService(db);
   const goals = goalService(db);
   const access = accessService(db);
@@ -2226,6 +2228,34 @@ export function buildHostServices(
           },
         });
         return { queued: Boolean(run), runId: run?.id ?? null };
+      },
+      async transferReviewOwner(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        const actor = {
+          actorAgentId: params.actorAgentId ?? null,
+          actorUserId: params.actorUserId ?? null,
+          actorRunId: params.actorRunId ?? null,
+        };
+        // Same transition as POST /issues/:id/review-owner/transfer; no wake.
+        const result = await reviewOwnerTransfer.transfer({
+          companyId,
+          issueId: params.issueId,
+          targetAgentId: params.targetAgentId,
+          expectedCurrentOwnerAgentId: params.expectedCurrentOwnerAgentId ?? null,
+          reason: params.reason ?? null,
+          actor: { actorType: "plugin", actorId: pluginId, agentId: actor.actorAgentId, runId: actor.actorRunId },
+          activityDetails: pluginActivityDetails(null, actor),
+        });
+        return {
+          outcome: result.outcome,
+          previousOwnerAgentId: result.summary.previousOwnerAgentId,
+          ownerAgentId: result.summary.ownerAgentId,
+          stageId: result.summary.stageId,
+          changesRequestedCount: result.summary.changesRequestedCount,
+          issue: result.issue as Issue,
+        };
       },
       async requestWakeups(params) {
         const companyId = ensureCompanyId(params.companyId);

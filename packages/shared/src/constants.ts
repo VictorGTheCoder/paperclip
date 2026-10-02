@@ -1349,6 +1349,9 @@ export const PLUGIN_CAPABILITIES = [
   "issue.relations.write",
   "issues.checkout",
   "issues.wakeup",
+  // Move the repair pass of a native review to another agent (assignee and
+  // executionState.returnAssignee only). Narrower than issues.update.
+  "issues.review.transfer_owner",
   "issue.comments.create",
   "issue.comments.create_human_attributed",
   "issue.interactions.create",

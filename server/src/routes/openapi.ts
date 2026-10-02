@@ -182,6 +182,7 @@ import {
   // Issue recovery and decomposition
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
+  transferIssueReviewOwnerSchema,
   cancelIssueThreadInteractionSchema,
   // Secret provider configs and remote import
   createSecretProviderConfigSchema,
@@ -7008,6 +7009,14 @@ registerCurrentRoute({
   tags: ["issues"],
   summary: "Resolve an issue recovery action",
   body: resolveIssueRecoveryActionSchema,
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/review-owner/transfer",
+  tags: ["issues"],
+  summary: "Transfer the repair owner of an issue in a native review repair pass",
+  body: transferIssueReviewOwnerSchema,
 });
 
 registerCurrentRoute({

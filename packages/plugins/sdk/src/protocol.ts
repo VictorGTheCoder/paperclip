@@ -60,6 +60,7 @@ import type {
   PluginIssueAttachmentContent,
   PluginIssueWakeupBatchResult,
   PluginIssueWakeupResult,
+  PluginReviewOwnerTransferResult,
   PluginJobContext,
   PluginExecutionWorkspaceMetadata,
   PluginWorkspace,
@@ -1924,6 +1925,19 @@ export interface WorkerToHostMethods {
       actorRunId?: string | null;
     },
     result: PluginIssueWakeupBatchResult[],
+  ];
+  "issues.review.transferOwner": [
+    params: {
+      issueId: string;
+      companyId: string;
+      targetAgentId: string;
+      expectedCurrentOwnerAgentId?: string | null;
+      reason?: string | null;
+      actorAgentId?: string | null;
+      actorUserId?: string | null;
+      actorRunId?: string | null;
+    },
+    result: PluginReviewOwnerTransferResult,
   ];
   "issues.summaries.getOrchestration": [
     params: {

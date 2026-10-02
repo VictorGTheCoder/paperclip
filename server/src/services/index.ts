@@ -51,6 +51,12 @@ export { issueApprovalService } from "./issue-approvals.js";
 export { issueReferenceService } from "./issue-references.js";
 export { issueRecoveryActionService } from "./issue-recovery-actions.js";
 export {
+  issueReviewOwnerTransferService,
+  ReviewOwnerTransferRefusedError,
+  type ReviewOwnerTransferActor,
+  type TransferReviewOwnerInput,
+} from "./issue-review-owner-transfer.js";
+export {
   stalledReviewDecisionService,
   type DecideStalledReviewInput,
   type StalledReviewDecisionActor,

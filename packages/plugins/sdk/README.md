@@ -333,6 +333,7 @@ Declare in `manifest.capabilities`. Grouped by scope:
 | | `issues.update` |
 | | `issues.checkout` |
 | | `issues.wakeup` |
+| | `issues.review.transfer_owner` |
 | | `issue.comments.create` |
 | | `issue.comments.create_human_attributed` |
 | | `issue.documents.write` |
@@ -601,6 +602,7 @@ Required capabilities:
 | `ctx.issues.createComment` | `issue.comments.create` |
 | `ctx.issues.createComment` with `actorUserId` | `issue.comments.create` + `issue.comments.create_human_attributed` |
 | `ctx.issues.requestWakeup` / `requestWakeups` | `issues.wakeup` |
+| `ctx.issues.transferReviewOwner` | `issues.review.transfer_owner` |
 | `ctx.issues.summaries.getOrchestration` | `issues.orchestration.read` |
 
 Plugin-originated mutations are logged with `actorType: "plugin"` and details fields `sourcePluginId`, `sourcePluginKey`, `initiatingActorType`, `initiatingActorId`, and `initiatingRunId` when a user or agent run initiated the plugin work.

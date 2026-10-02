@@ -425,6 +425,14 @@ export const resolveIssueRecoveryActionSchema = z.object({
 
 export type ResolveIssueRecoveryAction = z.infer<typeof resolveIssueRecoveryActionSchema>;
 
+export const transferIssueReviewOwnerSchema = z.object({
+  targetAgentId: z.string().guid(),
+  expectedCurrentOwnerAgentId: z.string().guid().optional().nullable(),
+  reason: z.string().trim().max(2000).optional().nullable(),
+}).strict();
+
+export type TransferIssueReviewOwner = z.infer<typeof transferIssueReviewOwnerSchema>;
+
 const issueRequestDepthInputSchema = z
   .number()
   .int()

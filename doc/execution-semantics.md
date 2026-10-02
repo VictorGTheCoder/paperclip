@@ -465,6 +465,16 @@ An `in_review` issue is stalled when it has no typed participant, no pending int
 
 When an execution-policy review stage has a pending agent participant, the participant's run is part of the review path only while it is live or queued. If that participant run reaches a terminal state while `executionState.status` remains `pending`, no decision has been recorded. Paperclip should queue one bounded normal-model recovery wake for the same participant when the agent is invokable and no other review path exists. If that recovery run also finishes while the stage remains pending, or the participant cannot be invoked, Paperclip must move the source issue to an explicit blocked/recovery path instead of leaving `in_review` to drift silently.
 
+### Review owner transfer
+
+A changes-requested decision hands the issue back to `executionState.returnAssignee`, and a resubmission keeps the recorded return assignee. A plain reassignment during the repair pass therefore does not change who receives the next hand-back. To move the repair to another agent, use the explicit transition `POST /api/issues/:id/review-owner/transfer` (board, `tasks:assign`) or `ctx.issues.transferReviewOwner` (plugins, `issues.review.transfer_owner`). Both call `issueReviewOwnerTransferService`; the decision itself is `planReviewOwnerTransfer` in `@paperclipai/shared`.
+
+- Allowed only during an agent-owned repair pass: `executionState.status = "changes_requested"` on a review stage, issue `todo`/`in_progress`/`blocked`, held by the current owner (or already by the target).
+- Writes only `assigneeAgentId` and `executionState.returnAssignee`. Stage, decision history, `changesRequestedCount`, completed stages, monitor and policy (including `maxReviewRounds`) are unchanged, so the round cap keeps counting across owners.
+- Refused with a stable code (`REVIEW_OWNER_TRANSFER_REFUSAL_CODES`) when a decision is pending — in particular a pending human escalation (`human_participant_pending`) — when the issue is terminal, when the target is invalid, another company's, the reviewer, or not assignable, when an active recovery action owns the issue, or while the previous owner has a running run or scheduled retry on it. A queued old-owner run is allowed: the heartbeat cancels it at claim time because the assignee changed.
+- Idempotent: repeating a completed transfer returns `outcome: "noop"` without writing, logging or waking. `expectedCurrentOwnerAgentId` is an optional compare-and-set guard; concurrent transfers serialize on the issue row lock.
+- Never enqueues a wake. The caller decides when the new owner starts (for plugins, `ctx.issues.requestWakeup`).
+
 ### Issue monitors
 
 An issue monitor is a one-shot deferred action path for agent-owned issues in `in_progress` or `in_review`.

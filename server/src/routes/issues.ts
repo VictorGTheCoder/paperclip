@@ -46,6 +46,7 @@ import {
   createIssueSchema,
   resolveCreateIssueStatusDefault,
   resolveIssueRecoveryActionSchema,
+  transferIssueReviewOwnerSchema,
   feedbackTargetTypeSchema,
   feedbackTraceStatusSchema,
   feedbackVoteValueSchema,
@@ -141,6 +142,7 @@ import {
   workProductService,
 } from "../services/index.js";
 import { questionResponseDeliveryService } from "../services/question-response-delivery.js";
+import { issueReviewOwnerTransferService } from "../services/issue-review-owner-transfer.js";
 import { artifactReviewDocumentService } from "../services/artifact-review-documents.js";
 import { assertCanResolveProposal } from "../services/secret-proposal-authorization.js";
 import { buildDocumentReviewContext, buildPlanReviewContext } from "../services/plan-review-context.js";
@@ -2833,6 +2835,7 @@ export function issueRoutes(
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
+  const reviewOwnerTransferSvc = issueReviewOwnerTransferService(db);
   const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
@@ -7208,6 +7211,40 @@ export function issueRoutes(
     const readableIssueIds = (await filterIssuesForActor(req, candidateIssues)).map((issue) => issue.id);
     const summaries = await externalObjectsSvc.getIssueSummaries(companyId, readableIssueIds);
     res.json({ summaries: Object.fromEntries(summaries) });
+  });
+
+  // Board-only: moves the repair pass of a native review to another agent so
+  // later changes-requested decisions route to it. The transition itself lives
+  // in issueReviewOwnerTransferService, shared with the plugin host.
+  router.post("/issues/:id/review-owner/transfer", validate(transferIssueReviewOwnerSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!existing) return;
+    assertBoard(req);
+    await assertCanAssignTasks(req, existing.companyId, {
+      issueId: existing.id,
+      projectId: existing.projectId,
+      parentIssueId: existing.parentId,
+      assigneeAgentId: req.body.targetAgentId,
+      assigneeUserId: null,
+    });
+    const actor = getActorInfo(req);
+    const result = await reviewOwnerTransferSvc.transfer({
+      companyId: existing.companyId,
+      issueId: existing.id,
+      targetAgentId: req.body.targetAgentId,
+      expectedCurrentOwnerAgentId: req.body.expectedCurrentOwnerAgentId ?? null,
+      reason: req.body.reason ?? null,
+      actor: { actorType: "user", actorId: actor.actorId },
+    });
+    res.json({
+      outcome: result.outcome,
+      previousOwnerAgentId: result.summary.previousOwnerAgentId,
+      ownerAgentId: result.summary.ownerAgentId,
+      stageId: result.summary.stageId,
+      changesRequestedCount: result.summary.changesRequestedCount,
+      issue: result.issue,
+    });
   });
 
   router.post("/issues/:id/external-objects/refresh", validate(refreshExternalObjectsSchema), async (req, res) => {

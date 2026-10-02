@@ -254,6 +254,8 @@ export type {
   PluginIssueCheckoutOwnership,
   PluginIssueWakeupResult,
   PluginIssueWakeupBatchResult,
+  PluginReviewOwnerTransferInput,
+  PluginReviewOwnerTransferResult,
   PluginIssueRunSummary,
   PluginIssueApprovalSummary,
   PluginIssueCostSummary,
@@ -439,3 +441,10 @@ export {
   MEMBERSHIP_STATUSES,
   PRINCIPAL_TYPES,
 } from "@paperclipai/shared";
+
+// Review owner transfer refusal vocabulary (`ctx.issues.transferReviewOwner`).
+export {
+  REVIEW_OWNER_TRANSFER_REFUSAL_CODES,
+  reviewOwnerTransferRefusalCode,
+} from "@paperclipai/shared";
+export type { ReviewOwnerTransferRefusalCode } from "@paperclipai/shared";

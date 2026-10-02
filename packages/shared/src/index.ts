@@ -124,6 +124,18 @@ export {
   type IssueWriteDenialTone,
 } from "./issue-write-denial.js";
 export {
+  REVIEW_OWNER_TRANSFER_REFUSAL_CODES,
+  REVIEW_OWNER_TRANSFER_REFUSAL_STATUS,
+  formatReviewOwnerTransferRefusal,
+  planReviewOwnerTransfer,
+  reviewOwnerTransferRefusalCode,
+  type ReviewOwnerTransferInput,
+  type ReviewOwnerTransferIssueInput,
+  type ReviewOwnerTransferPlan,
+  type ReviewOwnerTransferRefusalCode,
+  type ReviewOwnerTransferSummary,
+} from "./review-owner-transfer.js";
+export {
   RESPONSIBLE_USER_DENIAL_CODES,
   describeResponsibleUserDenial,
   isResponsibleUserDenialCode,
@@ -1809,6 +1821,7 @@ export {
   issueExecutionPolicySchema,
   issueExecutionStateSchema,
   resolveIssueRecoveryActionSchema,
+  transferIssueReviewOwnerSchema,
   issueReviewRequestSchema,
   issueExecutionWorkspaceSettingsSchema,
   checkoutIssueSchema,
@@ -1907,6 +1920,7 @@ export {
   type UpdateIssue,
   type StalledReviewDecision,
   type ResolveIssueRecoveryAction,
+  type TransferIssueReviewOwner,
   type CheckoutIssue,
   type AddIssueComment,
   type CreateIssueThreadInteraction,
