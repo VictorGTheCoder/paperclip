@@ -1630,6 +1630,150 @@ describe("issue execution policy transitions", () => {
   });
 
   describe("monitor policy", () => {
+    it("supersedes a triggered monitor when a fresh review generation starts", () => {
+      const policy = reviewOnlyPolicy();
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: {
+            status: "idle",
+            currentStageId: null,
+            currentStageIndex: null,
+            currentStageType: null,
+            currentParticipant: null,
+            returnAssignee: null,
+            reviewRequest: null,
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+            monitor: {
+              status: "triggered",
+              nextCheckAt: null,
+              lastTriggeredAt: "2026-10-02T14:50:27.618Z",
+              attemptCount: 1,
+              notes: "Wait for review of the superseded head",
+              scheduledBy: "assignee",
+              kind: "external_service",
+              serviceName: "review execution quota",
+              externalRef: "[redacted]",
+              timeoutAt: "2026-10-02T15:00:00.000Z",
+              maxAttempts: 1,
+              recoveryPolicy: "wake_owner",
+              clearedAt: null,
+              clearReason: null,
+            },
+          },
+          monitorAttemptCount: 1,
+          monitorNextCheckAt: null,
+          monitorLastTriggeredAt: new Date("2026-10-02T14:50:27.618Z"),
+          monitorNotes: "Wait for review of the superseded head",
+          monitorScheduledBy: "assignee",
+        },
+        policy,
+        previousPolicy: policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { agentId: coderAgentId },
+        reviewRequest: { instructions: "Review the revised exact head" },
+      });
+
+      expect(result.patch).toMatchObject({
+        status: "in_review",
+        assigneeAgentId: qaAgentId,
+        executionState: {
+          status: "pending",
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: qaAgentId },
+          reviewRequest: { instructions: "Review the revised exact head" },
+          monitor: {
+            status: "cleared",
+            clearReason: "execution_superseded",
+            attemptCount: 1,
+          },
+        },
+        monitorNextCheckAt: null,
+        monitorWakeRequestedAt: null,
+      });
+
+      const converged = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_review",
+          assigneeAgentId: qaAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: result.patch.executionState as Record<string, unknown>,
+          monitorAttemptCount: 1,
+          monitorNextCheckAt: null,
+          monitorLastTriggeredAt: new Date("2026-10-02T14:50:27.618Z"),
+          monitorNotes: "Wait for review of the superseded head",
+          monitorScheduledBy: "assignee",
+        },
+        policy,
+        previousPolicy: policy,
+        requestedAssigneePatch: {},
+        actor: { agentId: coderAgentId },
+      });
+
+      expect(converged.patch).toEqual({});
+    });
+
+    it("does not clear a triggered monitor that belongs to the current pending review", () => {
+      const policy = reviewOnlyPolicy();
+      const stageId = policy.stages[0].id;
+      const issue = {
+        status: "in_review",
+        assigneeAgentId: qaAgentId,
+        assigneeUserId: null,
+        executionPolicy: policy,
+        executionState: {
+          status: "pending",
+          currentStageId: stageId,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: qaAgentId },
+          returnAssignee: { type: "agent", agentId: coderAgentId },
+          reviewRequest: { instructions: "Review the current head" },
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+          monitor: {
+            status: "triggered",
+            nextCheckAt: null,
+            lastTriggeredAt: "2026-10-02T14:50:27.618Z",
+            attemptCount: 1,
+            notes: "Current review quota monitor",
+            scheduledBy: "assignee",
+            kind: "external_service",
+            serviceName: "review execution quota",
+            externalRef: "[redacted]",
+            timeoutAt: "2026-10-02T15:00:00.000Z",
+            maxAttempts: 1,
+            recoveryPolicy: "wake_owner",
+            clearedAt: null,
+            clearReason: null,
+          },
+        },
+        monitorAttemptCount: 1,
+        monitorNextCheckAt: null,
+        monitorLastTriggeredAt: new Date("2026-10-02T14:50:27.618Z"),
+        monitorNotes: "Current review quota monitor",
+        monitorScheduledBy: "assignee",
+      };
+
+      const result = applyIssueExecutionPolicyTransition({
+        issue,
+        policy,
+        previousPolicy: policy,
+        requestedAssigneePatch: {},
+        actor: { agentId: coderAgentId },
+      });
+
+      expect(result.patch).toEqual({});
+    });
+
     it("schedules a one-shot monitor on an active agent-owned issue", () => {
       const policy = normalizeIssueExecutionPolicy({
         stages: [],

@@ -140,6 +140,17 @@ function monitorStatesEqual(left: IssueExecutionMonitorState | null, right: Issu
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+function startsNewPendingExecutionGeneration(
+  previous: IssueExecutionState | null,
+  next: IssueExecutionState | null,
+): boolean {
+  if (next?.status !== PENDING_STATUS) return false;
+  if (previous?.status !== PENDING_STATUS) return true;
+  if (previous.currentStageId !== next.currentStageId) return true;
+  if (!principalsEqual(previous.currentParticipant, next.currentParticipant)) return true;
+  return JSON.stringify(previous.reviewRequest ?? null) !== JSON.stringify(next.reviewRequest ?? null);
+}
+
 function executionStateWithMonitor(
   stageState: IssueExecutionState | null,
   monitorState: IssueExecutionMonitorState | null,
@@ -1120,6 +1131,21 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
         input.monitorExplicitlyUpdated
           ? "manual"
           : monitorClearReasonForIssue(nextStatus, assigneeAgentId, assigneeUserId) ?? "manual",
+      clearedAt: new Date(),
+    });
+  } else if (
+    currentMonitorState?.status === "triggered" &&
+    startsNewPendingExecutionGeneration(existingState, stageState)
+  ) {
+    // A triggered one-shot monitor is historical once its monitor policy has
+    // been consumed. It must not be inherited by a later review/approval
+    // generation, where its old attempt bounds could be mistaken for current
+    // stage exhaustion by reconciliation.
+    patch.monitorNextCheckAt = null;
+    patch.monitorWakeRequestedAt = null;
+    targetMonitorState = buildClearedMonitorState({
+      previous: currentMonitorState,
+      clearReason: "execution_superseded",
       clearedAt: new Date(),
     });
   }
