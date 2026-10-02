@@ -546,7 +546,6 @@ export type IssueExecutionMonitorStateStatus = (typeof ISSUE_EXECUTION_MONITOR_S
 export const ISSUE_EXECUTION_MONITOR_CLEAR_REASONS = [
   "manual",
   "triggered",
-  "execution_superseded",
   "done",
   "cancelled",
   "invalid_status",

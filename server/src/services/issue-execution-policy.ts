@@ -1137,17 +1137,17 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
     currentMonitorState?.status === "triggered" &&
     startsNewPendingExecutionGeneration(existingState, stageState)
   ) {
-    // A triggered one-shot monitor is historical once its monitor policy has
-    // been consumed. It must not be inherited by a later review/approval
-    // generation, where its old attempt bounds could be mistaken for current
-    // stage exhaustion by reconciliation.
+    // A consumed one-shot monitor belongs to the execution generation that
+    // triggered it. Starting a fresh review/approval generation must not carry
+    // its attempt bounds forward: recovery consumers cannot safely infer
+    // generation identity from a historical "cleared" monitor alone.
     patch.monitorNextCheckAt = null;
     patch.monitorWakeRequestedAt = null;
-    targetMonitorState = buildClearedMonitorState({
-      previous: currentMonitorState,
-      clearReason: "execution_superseded",
-      clearedAt: new Date(),
-    });
+    patch.monitorLastTriggeredAt = null;
+    patch.monitorAttemptCount = 0;
+    patch.monitorNotes = null;
+    patch.monitorScheduledBy = null;
+    targetMonitorState = null;
   }
 
   if (stagePatch.executionState !== undefined || !monitorStatesEqual(currentMonitorState, targetMonitorState)) {
