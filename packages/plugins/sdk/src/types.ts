@@ -1250,6 +1250,8 @@ export interface PluginIssueCheckoutOwnership {
 }
 
 export interface PluginIssueWakeupResult {
+  /** queued is immediate run availability; deferred is accepted without a run yet. */
+  admission?: "queued" | "coalesced" | "deferred" | "skipped" | "not_queued";
   queued: boolean;
   runId: string | null;
 }
