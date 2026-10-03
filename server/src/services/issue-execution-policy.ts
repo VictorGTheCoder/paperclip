@@ -1081,7 +1081,22 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
     ? monitorClearReasonForIssue(nextStatus, assigneeAgentId, assigneeUserId)
     : null;
 
+  const supersedesTriggeredMonitor =
+    currentMonitorState?.status === "triggered" &&
+    startsNewPendingExecutionGeneration(existingState, stageState);
+  const currentGenerationMonitorState = supersedesTriggeredMonitor ? null : currentMonitorState;
+
   let targetMonitorState = currentMonitorState;
+
+  if (supersedesTriggeredMonitor) {
+    // The consumed monitor belongs to the previous execution generation.
+    // Reset its persisted counters before evaluating or scheduling any monitor
+    // supplied by the same transition for the new pending generation.
+    patch.monitorLastTriggeredAt = null;
+    patch.monitorAttemptCount = 0;
+    patch.monitorNotes = null;
+    patch.monitorScheduledBy = null;
+  }
 
   if (input.policy?.monitor) {
     if (invalidReason) {
@@ -1099,7 +1114,7 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
     } else {
       const exhaustedReason = exhaustedMonitorClearReason({
         monitor: input.policy.monitor,
-        attemptCount: currentMonitorState?.attemptCount ?? 0,
+        attemptCount: currentGenerationMonitorState?.attemptCount ?? 0,
         now: new Date(),
       });
       if (exhaustedReason) {
@@ -1119,7 +1134,7 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
         patch.monitorWakeRequestedAt = null;
         patch.monitorNotes = input.policy.monitor.notes ?? null;
         patch.monitorScheduledBy = input.policy.monitor.scheduledBy;
-        targetMonitorState = buildScheduledMonitorState(currentMonitorState, input.policy.monitor);
+        targetMonitorState = buildScheduledMonitorState(currentGenerationMonitorState, input.policy.monitor);
       }
     }
   } else if (previousPolicy?.monitor) {
@@ -1133,20 +1148,10 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
           : monitorClearReasonForIssue(nextStatus, assigneeAgentId, assigneeUserId) ?? "manual",
       clearedAt: new Date(),
     });
-  } else if (
-    currentMonitorState?.status === "triggered" &&
-    startsNewPendingExecutionGeneration(existingState, stageState)
-  ) {
-    // A consumed one-shot monitor belongs to the execution generation that
-    // triggered it. Starting a fresh review/approval generation must not carry
-    // its attempt bounds forward: recovery consumers cannot safely infer
-    // generation identity from a historical "cleared" monitor alone.
+  } else if (supersedesTriggeredMonitor) {
+    // No replacement monitor was supplied for the fresh generation.
     patch.monitorNextCheckAt = null;
     patch.monitorWakeRequestedAt = null;
-    patch.monitorLastTriggeredAt = null;
-    patch.monitorAttemptCount = 0;
-    patch.monitorNotes = null;
-    patch.monitorScheduledBy = null;
     targetMonitorState = null;
   }
 

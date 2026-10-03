@@ -1720,6 +1720,79 @@ describe("issue execution policy transitions", () => {
       expect(converged.patch).toEqual({});
     });
 
+    it("resets an exhausted prior-generation monitor when the same transition schedules the new generation monitor", () => {
+      const previousPolicy = reviewOnlyPolicy();
+      const policy = normalizeIssueExecutionPolicy({
+        stages: previousPolicy.stages,
+        monitor: {
+          nextCheckAt: "2099-10-03T12:00:00.000Z",
+          maxAttempts: 1,
+          scheduledBy: "assignee",
+          notes: "Monitor the new review generation",
+        },
+      })!;
+
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: previousPolicy,
+          executionState: {
+            status: "idle",
+            currentStageId: null,
+            currentStageIndex: null,
+            currentStageType: null,
+            currentParticipant: null,
+            returnAssignee: null,
+            reviewRequest: null,
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+            monitor: {
+              status: "triggered",
+              nextCheckAt: null,
+              lastTriggeredAt: "2026-10-02T14:50:27.618Z",
+              attemptCount: 1,
+              notes: "Old generation monitor",
+              scheduledBy: "assignee",
+              kind: "external_service",
+              serviceName: "review execution quota",
+              externalRef: "[redacted]",
+              timeoutAt: "2026-10-02T15:00:00.000Z",
+              maxAttempts: 1,
+              recoveryPolicy: "wake_owner",
+              clearedAt: null,
+              clearReason: null,
+            },
+          },
+          monitorAttemptCount: 1,
+          monitorNextCheckAt: null,
+          monitorLastTriggeredAt: new Date("2026-10-02T14:50:27.618Z"),
+          monitorNotes: "Old generation monitor",
+          monitorScheduledBy: "assignee",
+        },
+        policy,
+        previousPolicy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { agentId: coderAgentId },
+        reviewRequest: { instructions: "Review the new exact head" },
+        monitorExplicitlyUpdated: true,
+      });
+
+      expect(result.patch.monitorAttemptCount).toBe(0);
+      expect(result.patch.monitorLastTriggeredAt).toBeNull();
+      expect(result.patch.executionState).toMatchObject({
+        status: "pending",
+        monitor: {
+          status: "scheduled",
+          attemptCount: 0,
+          maxAttempts: 1,
+        },
+      });
+    });
+
     it("does not clear a triggered monitor that belongs to the current pending review", () => {
       const policy = reviewOnlyPolicy();
       const stageId = policy.stages[0].id;
