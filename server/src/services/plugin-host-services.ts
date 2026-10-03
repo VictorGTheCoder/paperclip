@@ -2186,7 +2186,9 @@ export function buildHostServices(
           throw new Error(budgetBlock.reason);
         }
         const contextSource = params.contextSource ?? "plugin.issue.requestWakeup";
+        let admission: "queued" | "coalesced" | "deferred" | "skipped" | "not_queued" = "not_queued";
         const run = await heartbeat.wakeup(issue.assigneeAgentId, {
+          onAdmission: (outcome) => { admission = outcome; },
           source: "assignment",
           triggerDetail: "system",
           reason: params.reason ?? "plugin_issue_wakeup_requested",
@@ -2209,6 +2211,7 @@ export function buildHostServices(
             pluginKey,
           },
         });
+        const wakeAdmission = run && admission === "not_queued" ? "queued" : admission;
         await logPluginActivity({
           companyId,
           action: "issue.assignment_wakeup_requested",
@@ -2223,11 +2226,12 @@ export function buildHostServices(
             identifier: issue.identifier,
             assigneeAgentId: issue.assigneeAgentId,
             runId: run?.id ?? null,
+            admission: wakeAdmission,
             reason: params.reason ?? "plugin_issue_wakeup_requested",
             contextSource,
           },
         });
-        return { queued: Boolean(run), runId: run?.id ?? null };
+        return { queued: Boolean(run), runId: run?.id ?? null, admission: wakeAdmission };
       },
       async transferReviewOwner(params) {
         const companyId = ensureCompanyId(params.companyId);

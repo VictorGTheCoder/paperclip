@@ -2621,6 +2621,8 @@ function normalizeMaxConcurrentRuns(value: unknown) {
 }
 
 interface WakeupOptions {
+  /** Internal admission result; reported only after the issue transaction commits. */
+  onAdmission?: (outcome: "queued" | "coalesced" | "deferred" | "skipped") => void;
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
   reason?: string | null;
@@ -18904,6 +18906,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return { kind: "skipped" as const };
         }
 
+        // A differently keyed reconcile wake can arrive after the old holder
+        // released the lock but before deferred promotion. Consume all equivalent
+        // deferred requests in this same issue-locked admission transaction. Keep
+        // their context and audit rows; none may later become a second stale run.
+        const pendingDeferred = await tx.select().from(agentWakeupRequests)
+          .where(and(
+            eq(agentWakeupRequests.companyId, issue.companyId),
+            eq(agentWakeupRequests.agentId, agentId),
+            eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+          ))
+          .orderBy(asc(agentWakeupRequests.requestedAt));
+        let admittedContextSnapshot: Record<string, unknown> = {};
+        for (const deferred of pendingDeferred) {
+          const deferredContext = parseObject(parseObject(deferred.payload)[DEFERRED_WAKE_CONTEXT_KEY]);
+          admittedContextSnapshot = mergeCoalescedContextSnapshot(admittedContextSnapshot, deferredContext);
+        }
+        admittedContextSnapshot = mergeCoalescedContextSnapshot(admittedContextSnapshot, enrichedContextSnapshot);
+
         const wakeupRequest = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -18931,7 +18952,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             status: "queued",
             responsibleUserId: await resolveQueuedResponsibleUserId(),
             wakeupRequestId: wakeupRequest.id,
-            contextSnapshot: enrichedContextSnapshot,
+            contextSnapshot: admittedContextSnapshot,
             sessionIdBefore: sessionBefore,
             continuationAttempt,
           })
@@ -18950,9 +18971,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // doesn't start it). It will be stamped in claimQueuedRun() once the run
         // transitions to "running" — Fix A (lazy locking).
 
+        if (pendingDeferred.length > 0) {
+          await tx.update(agentWakeupRequests).set({
+            status: "coalesced",
+            runId: newRun.id,
+            finishedAt: new Date(),
+            updatedAt: new Date(),
+          }).where(inArray(agentWakeupRequests.id, pendingDeferred.map((wake) => wake.id)));
+        }
+
         return { kind: "queued" as const, run: newRun };
       });
 
+      opts.onAdmission?.(outcome.kind);
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
       if (outcome.kind === "coalesced") {
         await startNextQueuedRunForAgent(agent.id);

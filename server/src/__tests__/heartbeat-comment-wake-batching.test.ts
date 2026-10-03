@@ -179,6 +179,75 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
     runningProcesses.clear();
   });
 
+  it("consumes a hand-back deferred wake when reconcile admits work after holder release", async () => {
+    const gateway = await createControlledGatewayServer();
+    const companyId = randomUUID();
+    const ownerId = randomUUID();
+    const reviewerId = randomUUID();
+    const holderId = randomUUID();
+    const issueId = randomUUID();
+    const heartbeat = heartbeatService(db);
+    const admissions: string[] = [];
+    try {
+      await db.insert(companies).values({ id: companyId, name: "Coalescence", issuePrefix: `T${companyId.slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user" });
+      await db.insert(agents).values([
+        { id: ownerId, companyId, name: "Senior", role: "engineer", status: "idle", adapterType: "openclaw_gateway", adapterConfig: { url: gateway.url, headers: { "x-openclaw-token": "gateway-token" }, payloadTemplate: { message: "wake now" }, waitTimeoutMs: 2_000 }, runtimeConfig: {}, permissions: {} },
+        { id: reviewerId, companyId, name: "Reviewer", role: "qa", status: "running", adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      ]);
+      await db.insert(heartbeatRuns).values({ id: holderId, companyId, agentId: reviewerId, invocationSource: "assignment", status: "running", contextSnapshot: { issueId } });
+      runningProcesses.set(holderId, { child: {} as never, graceSec: 0, processGroupId: null });
+      await db.insert(issues).values({ id: issueId, companyId, title: "Round 5 hand-back", status: "in_progress", priority: "medium", assigneeAgentId: ownerId, responsibleUserId: "responsible-user", executionRunId: holderId, issueNumber: 1 });
+      const wake = (key: string, source: string) => heartbeat.wakeup(ownerId, {
+        source: "assignment", triggerDetail: "system", reason: "review_handback", payload: { issueId },
+        contextSnapshot: { issueId, taskId: issueId, source, ...(key === "native" ? { handbackEvidence: "round-5" } : {}) },
+        idempotencyKey: key, requestedByActorType: "system", onAdmission: (outcome) => admissions.push(outcome),
+      });
+      expect(await wake("native", "issue.changes_requested")).toBeNull();
+      expect(await wake("observer-event", "tft-observer-issue-event")).toBeNull();
+      const deferred = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.status, "deferred_issue_execution")));
+      expect(deferred).toHaveLength(1);
+      expect(deferred[0].coalescedCount).toBe(1);
+      expect(admissions).toEqual(["deferred", "deferred"]);
+
+      // Observed canary gap: the holder is terminal, but its deferred request
+      // is still outstanding when differently keyed reconcile arrives.
+      await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, holderId));
+      runningProcesses.delete(holderId);
+      await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, issueId));
+      const admitted = await wake("reconcile-1", "tft-observer-reconcile");
+      expect(admitted).not.toBeNull();
+      await waitFor(() => gateway.getAgentPayloads().length === 1);
+      for (const key of ["reconcile-2", "reconcile-3", "liveness-4"]) {
+        expect((await wake(key, "tft-observer-reconcile"))?.id).toBe(admitted!.id);
+      }
+      const consumed = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferred[0].id)).then((rows) => rows[0]);
+      expect(consumed).toMatchObject({ status: "coalesced", runId: admitted!.id });
+      const admittedRow = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, admitted!.id)).then((rows) => rows[0]);
+      expect(admittedRow.contextSnapshot).toMatchObject({ handbackEvidence: "round-5" });
+
+      // The effective owner finishes and hands back before terminal promotion.
+      await db.update(issues).set({ status: "in_review", assigneeAgentId: reviewerId,
+        monitorNextCheckAt: new Date(Date.now() + 3_600_000),
+      }).where(eq(issues.id, issueId));
+      gateway.releaseFirstWait();
+      await waitFor(async () => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, admitted!.id)))[0]?.status === "succeeded");
+      // Await native finalization including release/promotion and any follow-up.
+      await heartbeat.drainActiveRunExecutions();
+      const ownerRuns = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, ownerId)));
+      expect(ownerRuns).toHaveLength(1);
+      expect(ownerRuns[0].errorCode).not.toBe("issue_assignee_changed");
+      expect(gateway.getAgentPayloads()).toHaveLength(1);
+      const remaining = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.status, "deferred_issue_execution")));
+      expect(remaining).toHaveLength(0);
+    } finally {
+      await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, issueId));
+      gateway.releaseFirstWait();
+      await heartbeat.cancelActiveForAgent(ownerId);
+      await heartbeat.drainActiveRunExecutions();
+      await gateway.close();
+    }
+  }, 120_000);
+
   it("defers approval-approved wakes for a running issue so the assignee resumes after the run", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
