@@ -1,6 +1,8 @@
+import { NATIVE_COMPLETION_BUDGET_CENTS } from "./native-completion-defaults.js";
 import path from "node:path";
 import { isManagedHiringCase } from "./chat-cases.js";
 import { FixtureRegistry } from "./fixture-registry.js";
+import { TASK_TITLE_BUDGET_CENTS } from "./task-titles.js";
 import { stageGrokSubscriptionFixture } from "./grok-subscription-fixture.js";
 import type { RunnerApi } from "./api.js";
 import type {
@@ -134,7 +136,9 @@ export async function setupLiveFixtures(input: {
       return api.post<CompanyRecord>("/api/companies", {
         name: `Runner E2E ${execution.id} ${input.executionNonce}`,
         description: "Ephemeral paid full-stack runner acceptance fixture",
-        budgetMonthlyCents: 0,
+        budgetMonthlyCents: execution.suite.id === "native-completion" ? NATIVE_COMPLETION_BUDGET_CENTS
+          : execution.suite.id === "task-titles" ? TASK_TITLE_BUDGET_CENTS
+          : execution.suite.id === "stock-harness" ? 1_000 : 0,
       });
     },
     async teardown() {
@@ -286,6 +290,7 @@ export async function setupLiveFixtures(input: {
         secretRefs,
         executionId: input.executionNonce,
       });
+      if (execution.suite.id === "stock-harness") agent.budgetMonthlyCents = 1_000;
       if (managedHiring) {
         const account = value<ManagedAccountFixture>(resolved, "ai-connection");
         const config = agent.adapterConfig as Record<string, unknown>;
@@ -306,7 +311,8 @@ export async function setupLiveFixtures(input: {
     },
   });
 
-  if (execution.environment.configurationKey === "warm-reuse-v1") {
+  if (execution.environment.configurationKey === "warm-reuse-v1"
+    || (execution.suite.id === "extended-harnesses" && execution.task.id === "file-edit-validate")) {
     registry.register<ProjectRecord>({
       id: "project",
       dependencies: ["company", "environment"],
@@ -316,9 +322,9 @@ export async function setupLiveFixtures(input: {
         return api.post<ProjectRecord>(
           `/api/companies/${company.id}/projects`,
           {
-            name: `Runner E2E warm project ${input.executionNonce}`,
+            name: `Runner E2E workspace project ${input.executionNonce}`,
             description:
-              "Ephemeral project anchoring a reusable Daytona execution workspace",
+              "Ephemeral project anchoring the fixture execution workspace and file copy-back",
             executionWorkspacePolicy: {
               enabled: true,
               defaultMode: "shared_workspace",

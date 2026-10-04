@@ -1,3 +1,4 @@
+import { QUALIFIED_ACPX_PROFILES, resolveQualifiedAcpxProfile } from "../drivers/acpx/qualified-profiles.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -297,6 +298,7 @@ describe("native backend factory", () => {
         resume: true,
         interruption: true,
         dynamicTools: true,
+        toolRefreshOnResume: true,
         collaborationModes: ["default", "plan"],
       },
     });
@@ -469,10 +471,14 @@ describe("native backend factory", () => {
     });
   });
 
-  it.each(["codex" as const, "claude" as const])(
+  it.each(["codex" as const, "claude" as const, "grok" as const])(
     "routes qualified %s ACPX through runnerd",
     async (agent) => {
-      const backend = createNativeSessionBackend(acpxExecution(agent), {
+      const input = acpxExecution();
+      if (input.provider.kind !== "acpx") throw new Error("Invalid ACPX fixture");
+      const model = agent === "grok" ? "grok-4.7" : agent === "claude" ? "claude-sonnet-5" : "gpt-5.6-sol";
+      Object.assign(input.provider, { agent, model, profile: resolveQualifiedAcpxProfile(agent, model) });
+      const backend = createNativeSessionBackend(input, {
         codexTransportFactory: () => {
           throw new Error("descriptor must not launch the transport");
         },
@@ -487,6 +493,7 @@ describe("native backend factory", () => {
           interruption: true,
           dynamicTools: true,
           collaborationModes: ["default", "plan"],
+          toolRefreshOnResume: true,
         },
       });
     },
@@ -496,6 +503,16 @@ describe("native backend factory", () => {
     expect(() => createNativeSessionBackend(acpxExecution())).toThrow(
       "requires an instance runtime directory",
     );
+  });
+  it.each(["pi", "cursor", "copilot"] as const)("constructs %s identity on the supplied runnerd transport without starting a provider", async agent => {
+    const input = acpxExecution();
+    if (input.provider.kind !== "acpx") throw new Error("invalid fixture");
+    const model = agent === "pi" ? QUALIFIED_ACPX_PROFILES.pi.qualificationModel : "explicit-fixture-model";
+    Object.assign(input.provider, { agent, model, profile: resolveQualifiedAcpxProfile(agent, model) });
+    const backend = createNativeSessionBackend(input, {
+      codexTransportFactory: () => { throw new Error("descriptor must not launch the transport"); },
+    });
+    await expect(backend.descriptor()).resolves.toMatchObject({ name: "acpx_runtime", version: "0.13.1" });
   });
 
   it.each(["claude" as const])(
@@ -512,12 +529,15 @@ describe("native backend factory", () => {
     },
   );
 
-  it("rejects Pi before constructing an ACPX backend", () => {
-    expect(() =>
-      createNativeSessionBackend(acpxExecution("pi"), {
-        acpxRuntimeDirectory: "/runtime",
-      }),
-    ).toThrow("descriptor-confined verified launch");
+  it.each(["pi", "cursor", "copilot"] as const)("rejects unqualified %s direct execution even with an exact persisted profile", agent => {
+    const input = acpxExecution();
+    if (input.provider.kind !== "acpx") throw new Error("invalid fixture");
+    const model = agent === "pi" ? QUALIFIED_ACPX_PROFILES.pi.qualificationModel : "explicit-fixture-model";
+    const profile = resolveQualifiedAcpxProfile(agent, model);
+    Object.assign(input.provider, { agent, model, profile });
+    expect(() => createNativeSessionBackend(input, { acpxRuntimeDirectory: "/runtime",
+      acpxEnvironment: { COPILOT_GITHUB_TOKEN: "explicit-fixture", CURSOR_API_KEY: "explicit-fixture", OPENROUTER_API_KEY: "explicit-fixture" },
+    })).toThrow("ACPX candidate direct execution requires completed qualification");
   });
 
   it("rejects a Codex ACPX snapshot that drifts from its qualified profile", () => {

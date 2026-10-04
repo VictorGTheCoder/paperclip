@@ -42,6 +42,8 @@ export function buildNativeExecutionInput(input: {
   };
   taskPrompt: string;
   initialCommunicationGuidance?: string | null;
+  /** Bounded, redacted background restored only after a fresh provider bootstrap. */
+  freshSessionHandoff?: string | null;
   /**
    * The already-sanitized Paperclip wake envelope for this run. Native drivers
    * receive a closed execution input rather than the legacy adapter context,
@@ -66,6 +68,7 @@ export function buildNativeExecutionInput(input: {
   provider?: "codex" | "opencode" | "claude_managed" | "aws_agentcore" | "acpx";
   acpxAgent?: NativeAcpxAgent;
   codexApprovalPolicy?: NativeCodexApprovalPolicy;
+  codexReasoningEffort?: string;
   opencodePermissionMode?: NativeOpenCodePermissionMode;
   acpxPermissionMode?: NativeAcpxPermissionMode;
   model?: string | null;
@@ -185,7 +188,9 @@ export function buildNativeExecutionInput(input: {
     : [];
   return parseNativeExecutionInput({
     schema: "paperclip.native-execution-input.v5",
-    ...(input.initialCommunicationGuidance ? { initialCommunicationGuidance: input.initialCommunicationGuidance } : {}),
+    ...((input.initialCommunicationGuidance || input.freshSessionHandoff) ? {
+      initialCommunicationGuidance: [input.initialCommunicationGuidance, input.freshSessionHandoff].filter(Boolean).join("\n\n"),
+    } : {}),
     ...(input.resumedSession && input.previousTurn && !input.conversationMode ? {
       continuationPrompt: buildNativeContinuationPrompt({
         wakePayload: input.wakePayload,
@@ -281,6 +286,7 @@ export function buildNativeExecutionInput(input: {
             kind: "codex",
             model: input.model ?? null,
             approvalPolicy: input.codexApprovalPolicy ?? "never",
+            ...(input.codexReasoningEffort ? { reasoningEffort: input.codexReasoningEffort } : {}),
           },
     completionContract: {
       id: input.completionContract.id,
