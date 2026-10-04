@@ -10,6 +10,7 @@ const mockIssueService = vi.hoisted(() => ({
   getByIdentifier: vi.fn(),
   createAttachment: vi.fn(),
   getAttachmentById: vi.fn(),
+  getAttachmentProducerRunId: vi.fn(),
 }));
 const mockCompanyService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -699,7 +700,90 @@ describe("issue attachment routes", () => {
     );
   });
 
-  it("rejects paperclip artifact metadata that references another issue's attachment", async () => {
+  it("allows an explicit cross-issue completion evidence reference without changing artifact provenance", async () => {
+    const storage = createStorageService();
+    const consumerIssue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      identifier: "PAP-1",
+      projectId: null,
+    };
+    const producerIssue = {
+      id: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      identifier: "PAP-2",
+      projectId: null,
+      parentId: null,
+      status: "done",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+    };
+    const attachmentId = "22222222-2222-4222-8222-222222222222";
+    const producerRunId = "44444444-4444-4444-8444-444444444444";
+    const sha256 = "a".repeat(64);
+    const producerAttachment = {
+      ...makeAttachment("application/json", "evidence.json"),
+      id: attachmentId,
+      issueId: producerIssue.id,
+      sha256,
+    };
+
+    mockIssueService.getById.mockImplementation(async (id: string) => {
+      if (id === consumerIssue.id) return consumerIssue;
+      if (id === producerIssue.id) return producerIssue;
+      return null;
+    });
+    mockIssueService.getAttachmentById.mockResolvedValue(producerAttachment);
+    mockIssueService.getAttachmentProducerRunId.mockResolvedValue(producerRunId);
+    mockWorkProductService.createForIssue.mockResolvedValue({
+      id: "work-product-1",
+      issueId: consumerIssue.id,
+      companyId: consumerIssue.companyId,
+      type: "artifact",
+      provider: "paperclip",
+      title: "Publisher evidence",
+      metadata: null,
+    });
+
+    const app = await createApp(storage);
+    const res = await request(app)
+      .post(`/api/issues/${consumerIssue.id}/work-products`)
+      .send({
+        type: "artifact",
+        provider: "paperclip",
+        title: "Publisher evidence",
+        metadata: {
+          attachmentId,
+          evidenceReference: {
+            purpose: "publisher",
+            expectedSha256: sha256,
+          },
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockWorkProductService.createForIssue).toHaveBeenCalledWith(
+      consumerIssue.id,
+      consumerIssue.companyId,
+      expect.objectContaining({
+        type: "artifact",
+        provider: "paperclip",
+        metadata: expect.objectContaining({
+          attachmentId,
+          sha256,
+          evidenceReference: {
+            purpose: "publisher",
+            producedByIssueId: producerIssue.id,
+            producedByRunId: producerRunId,
+          },
+        }),
+      }),
+    );
+    expect(producerAttachment.issueId).toBe(producerIssue.id);
+    expect(producerAttachment.sha256).toBe(sha256);
+  }, 30_000);
+
+  it("rejects a cross-issue attachment without a canonical evidence reference", async () => {
     const storage = createStorageService();
     const issue = {
       id: "11111111-1111-4111-8111-111111111111",
@@ -711,7 +795,7 @@ describe("issue attachment routes", () => {
     mockIssueService.getAttachmentById.mockResolvedValue({
       ...makeAttachment("video/mp4", "clip.mp4"),
       id: "22222222-2222-4222-8222-222222222222",
-      issueId: "different-issue",
+      issueId: "33333333-3333-4333-8333-333333333333",
     });
 
     const app = await createApp(storage);
@@ -727,7 +811,192 @@ describe("issue attachment routes", () => {
       });
 
     expect(res.status).toBe(422);
-    expect(res.body.error).toBe("Attachment artifact must reference an attachment on the same issue");
+    expect(res.body.code).toBe("cross_issue_artifact_not_authorized");
+    expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
+  });
+
+  it("rejects a canonical cross-issue evidence reference when the attachment does not exist", async () => {
+    const storage = createStorageService();
+    const issue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      identifier: "PAP-1",
+      projectId: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.getAttachmentById.mockResolvedValue(null);
+
+    const app = await createApp(storage);
+    const res = await request(app)
+      .post(`/api/issues/${issue.id}/work-products`)
+      .send({
+        type: "artifact",
+        provider: "paperclip",
+        title: "Missing evidence",
+        metadata: {
+          attachmentId: "22222222-2222-4222-8222-222222222222",
+          evidenceReference: {
+            purpose: "completion",
+            expectedSha256: "a".repeat(64),
+          },
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("cross_issue_artifact_not_authorized");
+    expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
+  });
+
+  it("rejects a canonical cross-issue evidence reference with the wrong digest", async () => {
+    const storage = createStorageService();
+    const consumerIssue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      identifier: "PAP-1",
+      projectId: null,
+    };
+    const producerIssueId = "33333333-3333-4333-8333-333333333333";
+    mockIssueService.getById.mockResolvedValue(consumerIssue);
+    mockIssueService.getAttachmentById.mockResolvedValue({
+      ...makeAttachment("application/json", "evidence.json"),
+      id: "22222222-2222-4222-8222-222222222222",
+      issueId: producerIssueId,
+      sha256: "b".repeat(64),
+    });
+
+    const app = await createApp(storage);
+    const res = await request(app)
+      .post(`/api/issues/${consumerIssue.id}/work-products`)
+      .send({
+        type: "artifact",
+        provider: "paperclip",
+        title: "Publisher evidence",
+        metadata: {
+          attachmentId: "22222222-2222-4222-8222-222222222222",
+          evidenceReference: {
+            purpose: "publisher",
+            expectedSha256: "a".repeat(64),
+          },
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("cross_issue_artifact_not_authorized");
+    expect(mockIssueService.getAttachmentProducerRunId).not.toHaveBeenCalled();
+    expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
+  });
+
+  it("rejects a canonical cross-issue evidence reference when producer-run provenance is ambiguous", async () => {
+    const storage = createStorageService();
+    const consumerIssue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      identifier: "PAP-1",
+      projectId: null,
+    };
+    const producerIssue = {
+      id: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      identifier: "PAP-2",
+      projectId: null,
+      parentId: null,
+      status: "done",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+    };
+    const attachmentId = "22222222-2222-4222-8222-222222222222";
+    const sha256 = "a".repeat(64);
+    mockIssueService.getById.mockImplementation(async (id: string) => {
+      if (id === consumerIssue.id) return consumerIssue;
+      if (id === producerIssue.id) return producerIssue;
+      return null;
+    });
+    mockIssueService.getAttachmentById.mockResolvedValue({
+      ...makeAttachment("application/json", "evidence.json"),
+      id: attachmentId,
+      issueId: producerIssue.id,
+      sha256,
+    });
+    mockIssueService.getAttachmentProducerRunId.mockResolvedValue(null);
+
+    const app = await createApp(storage);
+    const res = await request(app)
+      .post(`/api/issues/${consumerIssue.id}/work-products`)
+      .send({
+        type: "artifact",
+        provider: "paperclip",
+        title: "Ambiguous publisher evidence",
+        metadata: {
+          attachmentId,
+          evidenceReference: {
+            purpose: "publisher",
+            expectedSha256: sha256,
+          },
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("cross_issue_artifact_not_authorized");
+    expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
+  });
+
+  it("rejects a canonical cross-issue evidence reference when the producer issue is not readable", async () => {
+    const storage = createStorageService();
+    const consumerIssue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      identifier: "PAP-1",
+      projectId: null,
+    };
+    const producerIssue = {
+      id: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      identifier: "PAP-2",
+      projectId: null,
+      parentId: null,
+      status: "done",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+    };
+    const attachmentId = "22222222-2222-4222-8222-222222222222";
+    const sha256 = "a".repeat(64);
+    mockIssueService.getById.mockImplementation(async (id: string) => {
+      if (id === consumerIssue.id) return consumerIssue;
+      if (id === producerIssue.id) return producerIssue;
+      return null;
+    });
+    mockIssueService.getAttachmentById.mockResolvedValue({
+      ...makeAttachment("application/json", "evidence.json"),
+      id: attachmentId,
+      issueId: producerIssue.id,
+      sha256,
+    });
+    mockAccessService.decide.mockImplementation(async (input: any) => {
+      if (input.action === "issue:read" && input.resource?.issueId === producerIssue.id) {
+        return { allowed: false, explanation: "Denied by test mock" };
+      }
+      return { allowed: true, explanation: "Allowed by test mock" };
+    });
+
+    const app = await createApp(storage);
+    const res = await request(app)
+      .post(`/api/issues/${consumerIssue.id}/work-products`)
+      .send({
+        type: "artifact",
+        provider: "paperclip",
+        title: "Unreadable producer evidence",
+        metadata: {
+          attachmentId,
+          evidenceReference: {
+            purpose: "completion",
+            expectedSha256: sha256,
+          },
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("cross_issue_artifact_not_authorized");
+    expect(mockIssueService.getAttachmentProducerRunId).not.toHaveBeenCalled();
     expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
   });
 

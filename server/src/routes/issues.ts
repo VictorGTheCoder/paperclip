@@ -466,6 +466,10 @@ function requiresPaperclipAttachmentMetadata(input: {
 
 const attachmentArtifactMetadataInputSchema = z.object({
   attachmentId: z.string().guid(),
+  evidenceReference: z.object({
+    purpose: z.enum(["completion", "publisher"]),
+    expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/),
+  }).optional(),
 }).passthrough();
 
 function buildCreateIssueActivityStatusDetails(
@@ -3461,6 +3465,7 @@ export function issueRoutes(
   }
 
   async function canonicalizePaperclipArtifactMetadata(input: {
+    req: Request;
     issue: { id: string; companyId: string };
     metadata: Record<string, unknown> | null | undefined;
   }) {
@@ -3472,12 +3477,52 @@ export function issueRoutes(
       });
     }
 
+    const rejectCrossIssueReference = (): never => {
+      throw unprocessable("Cross-issue artifact is not canonically authorized", {
+        code: "cross_issue_artifact_not_authorized",
+        attachmentId: parsed.data.attachmentId,
+      });
+    };
+
     const attachment = await svc.getAttachmentById(parsed.data.attachmentId);
-    if (!attachment || attachment.companyId !== input.issue.companyId || attachment.issueId !== input.issue.id) {
+    if (!attachment || attachment.companyId !== input.issue.companyId) {
+      if (parsed.data.evidenceReference) rejectCrossIssueReference();
       throw unprocessable("Attachment artifact must reference an attachment on the same issue", {
         code: "invalid_attachment_artifact_metadata",
         attachmentId: parsed.data.attachmentId,
       });
+    }
+
+    let evidenceReference:
+      | {
+          purpose: "completion" | "publisher";
+          producedByIssueId: string;
+          producedByRunId: string;
+        }
+      | undefined;
+
+    if (attachment.issueId !== input.issue.id) {
+      const requestedReference = parsed.data.evidenceReference ?? rejectCrossIssueReference();
+      if (requestedReference.expectedSha256.toLowerCase() !== attachment.sha256.toLowerCase()) {
+        rejectCrossIssueReference();
+      }
+
+      const producerIssue = await svc.getById(attachment.issueId) ?? rejectCrossIssueReference();
+      if (producerIssue.companyId !== input.issue.companyId) rejectCrossIssueReference();
+      const producerAccess = await decideIssueAccess(input.req, producerIssue, "issue:read");
+      if (!producerAccess.allowed) rejectCrossIssueReference();
+
+      const producedByRunId = await svc.getAttachmentProducerRunId({
+        attachmentId: attachment.id,
+        companyId: attachment.companyId,
+        issueId: attachment.issueId,
+      }) ?? rejectCrossIssueReference();
+
+      evidenceReference = {
+        purpose: requestedReference.purpose,
+        producedByIssueId: attachment.issueId,
+        producedByRunId,
+      };
     }
 
     const contentPath = buildAttachmentContentPath(attachment.id);
@@ -3485,6 +3530,7 @@ export function issueRoutes(
       attachmentId: attachment.id,
       contentType: normalizeContentType(attachment.contentType),
       byteSize: attachment.byteSize,
+      ...(evidenceReference ? { sha256: attachment.sha256, evidenceReference } : {}),
       contentPath,
       openPath: contentPath,
       downloadPath: `${contentPath}?download=1`,
@@ -7956,6 +8002,7 @@ export function issueRoutes(
     createInput.createdByRunId = createdByRunId;
     if (requiresPaperclipAttachmentMetadata(createInput)) {
       createInput.metadata = await canonicalizePaperclipArtifactMetadata({
+        req,
         issue,
         metadata: req.body.metadata ?? null,
       });
@@ -8248,6 +8295,7 @@ export function issueRoutes(
     if (requiresPaperclipAttachmentMetadata(patch, existing)) {
       if (patch.metadata !== undefined) {
         patch.metadata = await canonicalizePaperclipArtifactMetadata({
+          req,
           issue,
           metadata: patch.metadata ?? null,
         });
