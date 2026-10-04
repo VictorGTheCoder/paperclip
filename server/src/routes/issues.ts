@@ -8992,7 +8992,9 @@ export function issueRoutes(
         identifier: issue.identifier,
         title: issue.title,
         ...buildCreateIssueActivityStatusDetails(issue, res),
-        inheritedExecutionWorkspaceFromIssueId: parent.id,
+        executionWorkspaceInheritanceMode: createBody.executionWorkspaceInheritanceMode ?? "strategy_only",
+        inheritedExecutionWorkspaceFromIssueId:
+          (createBody.executionWorkspaceInheritanceMode ?? "strategy_only") === "linkage" ? parent.id : null,
         ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
         ...(parentBlockerAdded ? { parentBlockerAdded: true } : {}),
         ...(serializationContext
@@ -9215,7 +9217,8 @@ export function issueRoutes(
           parentId: sourceIssue.id,
           identifier: issue.identifier,
           title: issue.title,
-          inheritedExecutionWorkspaceFromIssueId: sourceIssue.id,
+          executionWorkspaceInheritanceMode: "strategy_only",
+          inheritedExecutionWorkspaceFromIssueId: null,
           acceptedPlanRevisionId: req.body.acceptedPlanRevisionId,
           ...buildCreateIssueActivityStatusDetails(issue, res),
           ...(serializationContext
