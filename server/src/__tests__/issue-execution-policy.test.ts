@@ -1428,6 +1428,168 @@ describe("issue execution policy transitions", () => {
     });
   });
 
+  describe("direct review handoff without a pre-existing assignee", () => {
+    it("keeps changes_requested actionable by returning work to the principal that initiated review", () => {
+      const policy = reviewOnlyPolicy();
+
+      const started = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "backlog",
+          assigneeAgentId: null,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: null,
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+        commentBody: "Send this directly to review",
+      });
+
+      expect(started.patch).toMatchObject({
+        status: "in_review",
+        assigneeAgentId: qaAgentId,
+        assigneeUserId: null,
+        executionState: {
+          status: "pending",
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: qaAgentId },
+        },
+      });
+
+      const stableRescan = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_review",
+          assigneeAgentId: qaAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: started.patch.executionState as IssueExecutionState,
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+        commentBody: null,
+      });
+
+      expect(stableRescan.patch).toEqual({});
+      expect(stableRescan.decision).toBeUndefined();
+
+      const changesRequested = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_review",
+          assigneeAgentId: qaAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: started.patch.executionState as IssueExecutionState,
+        },
+        policy,
+        requestedStatus: "in_progress",
+        requestedAssigneePatch: {},
+        actor: { agentId: qaAgentId },
+        commentBody: "Changes are required before approval",
+      });
+
+      expect(started.patch.executionState).toMatchObject({
+        returnAssignee: { type: "user", userId: boardUserId },
+      });
+      expect(changesRequested.patch).toMatchObject({
+        status: "in_progress",
+        assigneeAgentId: null,
+        assigneeUserId: boardUserId,
+        executionState: {
+          status: "changes_requested",
+          currentStageType: "review",
+          lastDecisionOutcome: "changes_requested",
+          returnAssignee: { type: "user", userId: boardUserId },
+        },
+      });
+      expect(changesRequested.decision).toMatchObject({
+        stageType: "review",
+        outcome: "changes_requested",
+      });
+    });
+
+    it("keeps the current executor ahead of the initiating user", () => {
+      const policy = reviewOnlyPolicy();
+      const started = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: null,
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+        commentBody: "Send executor work to review",
+      });
+
+      expect(started.patch.executionState).toMatchObject({
+        status: "pending",
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+      });
+    });
+
+    it("keeps an existing return assignee ahead of the current assignee and actor", () => {
+      const policy = reviewOnlyPolicy();
+      const reviewStageId = policy.stages[0].id;
+      const resumed = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: null,
+          assigneeUserId: boardUserId,
+          executionPolicy: policy,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: reviewStageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: qaAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: ctoUserId },
+        commentBody: "Resume review without changing ownership",
+      });
+
+      expect(resumed.patch.executionState).toMatchObject({
+        status: "pending",
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+      });
+    });
+
+    it("does not make an agent actor the implicit owner of otherwise unassigned work", () => {
+      const policy = reviewOnlyPolicy();
+
+      expect(() =>
+        applyIssueExecutionPolicyTransition({
+          issue: {
+            status: "backlog",
+            assigneeAgentId: null,
+            assigneeUserId: null,
+            executionPolicy: policy,
+            executionState: null,
+          },
+          policy,
+          requestedStatus: "in_review",
+          requestedAssigneePatch: {},
+          actor: { agentId: coderAgentId },
+          commentBody: "Attempt review without an owner",
+        }),
+      ).toThrow("without a return assignee");
+    });
+  });
+
   describe("changes requested with no return assignee", () => {
     it("throws when requesting changes with no return assignee", () => {
       const policy = twoStagePolicy();
