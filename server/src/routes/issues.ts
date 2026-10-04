@@ -13714,7 +13714,6 @@ export function issueRoutes(
         reviewPolicySensitiveMutationRequested;
       let transactionalComment: Awaited<ReturnType<typeof svc.addComment>> | null =
         null;
-      let commentPersistedTransactionally = false;
       const transactionalCommentSourceTrust =
         commentBody &&
         shouldUseTransactionalIssueUpdate &&
@@ -13766,10 +13765,10 @@ export function issueRoutes(
                   mirrorToSlack: actor.actorType === "user",
                   authorizationReason: issueMutationAuthorizationReason,
                   sourceTrust: transactionalCommentSourceTrust,
+                  postCommitActivityPublications,
                 },
                 tx,
               );
-              commentPersistedTransactionally = true;
             }
 
             if (decision && decisionId) {
@@ -14362,24 +14361,22 @@ export function issueRoutes(
         const commentReferenceSummaryBefore =
           updateReferenceSummaryAfter ??
           (await issueReferencesSvc.listIssueReferenceSummary(issue.id));
-        if (!commentPersistedTransactionally) {
-          comment = await svc.addComment(
-            id,
-            commentBody,
-            {
-              agentId: actor.agentId ?? undefined,
-              userId: actor.actorType === "user" ? actor.actorId : undefined,
-              runId: actor.runId,
-              onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-            },
-            {
-              authorizationReason: issueMutationAuthorizationReason,
-              clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
-              mirrorToSlack: actor.actorType === "user",
-              sourceTrust: await sourceTrustForActorWrite(issue, actor),
-            },
-          );
-        }
+        comment ??= await svc.addComment(
+          id,
+          commentBody,
+          {
+            agentId: actor.agentId ?? undefined,
+            userId: actor.actorType === "user" ? actor.actorId : undefined,
+            runId: actor.runId,
+            onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+          },
+          {
+            authorizationReason: issueMutationAuthorizationReason,
+            clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
+            mirrorToSlack: actor.actorType === "user",
+            sourceTrust: await sourceTrustForActorWrite(issue, actor),
+          },
+        );
         await issueReferencesSvc.syncComment(comment.id);
         await externalObjectsSvc.syncCommentSafely(comment.id);
         if (

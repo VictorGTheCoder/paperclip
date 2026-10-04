@@ -460,11 +460,13 @@ the workflow. Comment reference indexing, activity publication, and assignee
 wakeups run only after that transaction commits.
 
 Board and user clients should send a stable `commentClientRequestId`. If the
-transaction fails, they can retry with that same receipt key. After a successful
-decision, a replay is rejected with HTTP 422 by the completed-stage check; it
-does not return a second success or insert another comment or decision. Agent
-requests do not send `commentClientRequestId`; the completed-stage check prevents
-them from applying the decision again.
+transaction fails before commit, they can retry with that same receipt key. The
+receipt deduplicates the comment body for that user and issue; it is not an
+idempotency key for a review-stage decision. Clients must not blindly replay a
+successful `status: "done"` decision: if the same actor is eligible for a later
+stage, a replay can be interpreted as a new decision for that stage. Agent
+requests do not send `commentClientRequestId`, so callers must likewise treat a
+successful stage decision as terminal for that request rather than retrying it.
 
 ## Legacy controller ownership
 
