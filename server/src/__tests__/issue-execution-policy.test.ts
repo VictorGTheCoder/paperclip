@@ -1013,6 +1013,35 @@ describe("issue execution policy transitions", () => {
       });
     });
 
+    it("preserves an explicit blocked disposition on an unrelated patch while a stage is pending", () => {
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "blocked",
+          assigneeAgentId: qaAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: {
+            status: "pending",
+            currentStageId: reviewStageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: qaAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+          },
+        },
+        policy,
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+      });
+
+      expect(result.patch).toEqual({});
+      expect(result.decision).toBeUndefined();
+      expect(result.workflowControlledAssignment).toBeUndefined();
+    });
+
     it("reasserts the active stage when issue status drifted out of in_review", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: {

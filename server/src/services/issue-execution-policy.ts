@@ -726,6 +726,14 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       throw unprocessable(`No eligible ${activeStage.type} participant is configured for this issue`);
     }
 
+    // `blocked` is an explicit durable disposition. An unrelated PATCH (for
+    // example editing the description) must not be interpreted as execution
+    // stage drift and silently reactivate the pending review/approval stage.
+    // Explicit status transitions still flow through the normal stage rules.
+    if (input.issue.status === "blocked" && requestedStatus === undefined) {
+      return { patch };
+    }
+
     // An escalated review is deliberately held by a human who is not in the
     // stage's configured participants. Re-selecting a configured (agent)
     // participant would silently undo the escalation on the next unrelated
