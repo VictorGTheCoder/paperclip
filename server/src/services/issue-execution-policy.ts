@@ -994,7 +994,13 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       : nextPendingStage(input.policy, existingState);
   if (!pendingStage) return { patch };
 
-  const returnAssignee = existingState?.returnAssignee ?? currentAssignee;
+  // Direct review of otherwise unowned work may hand back to the user who
+  // explicitly initiated review. Agent actors are not implicit executors.
+  const initiatingUser = actor?.type === "user" ? actor : null;
+  const returnAssignee = existingState?.returnAssignee ?? currentAssignee ?? initiatingUser;
+  if (!returnAssignee) {
+    throw unprocessable("Cannot start an execution stage without a return assignee");
+  }
   const skippedStageIds = [...(existingState?.completedStageIds ?? [])];
   let participant = selectStageParticipant(pendingStage, {
     preferred:
