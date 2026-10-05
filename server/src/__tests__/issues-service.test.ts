@@ -1,4 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
@@ -2832,7 +2836,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
+  it("does not implicitly reuse the parent execution workspace when child workspace fields are omitted", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -2900,12 +2904,115 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(child.parentId).toBe(parentIssueId);
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
     expect(child.executionWorkspaceSettings).toEqual({
       mode: "isolated_workspace",
       workspaceRuntime: { profile: "agent" },
     });
+  });
+
+  it("prevents autonomous child commits from mutating the parent workspace branch", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+    const repoDir = mkdtempSync(join(tmpdir(), "paperclip-child-lineage-"));
+
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: repoDir, encoding: "utf8" }).trim();
+
+    try {
+      git("init");
+      git("config", "user.name", "Paperclip Test");
+      git("config", "user.email", "test@paperclip.local");
+      writeFileSync(join(repoDir, "README.md"), "parent\n");
+      git("add", "README.md");
+      git("commit", "-m", "parent baseline");
+      git("branch", "-M", "branch-A");
+      const parentHeadBefore = git("rev-parse", "branch-A");
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: "TLINEAGE",
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+      await db.insert(projects).values({
+        id: projectId,
+        companyId,
+        name: "Workspace project",
+        status: "in_progress",
+      });
+      await db.insert(projectWorkspaces).values({
+        id: projectWorkspaceId,
+        companyId,
+        projectId,
+        name: "Primary workspace",
+        isPrimary: true,
+      });
+      await db.insert(issues).values({
+        id: parentIssueId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        title: "Parent A",
+        status: "in_progress",
+        priority: "medium",
+        executionWorkspaceSettings: {
+          mode: "isolated_workspace",
+          workspaceStrategy: {
+            type: "git_worktree",
+            baseRef: "main",
+            branchTemplate: "{{issue.identifier}}",
+          },
+        },
+      });
+      await db.insert(executionWorkspaces).values({
+        id: executionWorkspaceId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        sourceIssueId: parentIssueId,
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        name: "branch-A",
+        status: "active",
+        cwd: repoDir,
+        branchName: "branch-A",
+        providerType: "git_worktree",
+        providerRef: repoDir,
+      });
+      await db
+        .update(issues)
+        .set({
+          executionWorkspaceId,
+          executionWorkspacePreference: "reuse_existing",
+        })
+        .where(eq(issues.id, parentIssueId));
+
+      const child = await svc.create(companyId, {
+        parentId: parentIssueId,
+        title: "Autonomous child B",
+        status: "todo",
+      });
+
+      // This branch models the old failure mode. Before the fix, B inherited
+      // WA, so a normal child commit mutated branch-A directly.
+      if (child.executionWorkspaceId === executionWorkspaceId) {
+        writeFileSync(join(repoDir, "child.txt"), "child work\n");
+        git("add", "child.txt");
+        git("commit", "-m", "child B work");
+      }
+
+      expect(child.executionWorkspaceId).toBeNull();
+      expect(child.executionWorkspacePreference).toBeNull();
+      expect(git("rev-parse", "branch-A")).toBe(parentHeadBefore);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 
   it("inherits responsible user for agent-created child issues", async () => {
@@ -3513,7 +3620,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("createChild applies parent defaults, acceptance criteria, workspace inheritance, and optional parent blocker chaining", async () => {
+  it("createChild applies parent defaults without implicitly sharing the parent's realized workspace", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const goalId = randomUUID();
@@ -3587,7 +3694,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       title: "Child helper",
       status: "todo",
       description: "Implement the helper.",
-      acceptanceCriteria: ["Uses the parent issue as parentId", "Reuses the parent execution workspace"],
+      acceptanceCriteria: ["Uses the parent issue as parentId", "Keeps autonomous Git identity"],
       blockParentUntilDone: true,
     });
 
@@ -3599,8 +3706,11 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.description).toContain("## Acceptance Criteria");
     expect(child.description).toContain("- Uses the parent issue as parentId");
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
+    expect(child.executionWorkspaceSettings).toEqual({
+      mode: "isolated_workspace",
+    });
 
     const parentRelations = await svc.getRelationSummaries(parentIssueId);
     expect(parentRelations.blockedBy).toEqual([
@@ -3609,6 +3719,17 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         title: "Child helper",
       }),
     ]);
+
+    const { issue: continuation } = await svc.createChild(parentIssueId, {
+      title: "Continuation helper",
+      status: "todo",
+      executionWorkspaceInheritanceMode: "linkage",
+    });
+    expect(continuation.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(continuation.executionWorkspacePreference).toBe("reuse_existing");
+    expect(continuation.executionWorkspaceSettings).toEqual({
+      mode: "isolated_workspace",
+    });
   });
 
   it("createChild preserves strategy-only workspace intent without realizing the parent workspace", async () => {
@@ -4656,7 +4777,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
+  it("does not implicitly reuse the parent execution workspace when child workspace fields are omitted", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -4724,15 +4845,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(child.parentId).toBe(parentIssueId);
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
     expect(child.executionWorkspaceSettings).toEqual({
       mode: "isolated_workspace",
       workspaceRuntime: { profile: "agent" },
     });
   });
 
-  it("preserves the parent project when a generic child create inherits workspace linkage", async () => {
+  it("preserves parent project context without inheriting the parent's realized workspace", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -4797,7 +4918,9 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.parentId).toBe(parentIssueId);
     expect(child.projectId).toBe(projectId);
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
+    expect(child.executionWorkspaceSettings).toEqual({ mode: "isolated_workspace" });
   });
 
   it("rejects explicitly pinned isolated git worktrees without a project or reusable workspace", async () => {

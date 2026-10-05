@@ -278,6 +278,7 @@ describe("assigned backlog creation contract", () => {
         title: "Assigned child blocker",
         assigneeAgentId,
         blockParentUntilDone: true,
+        executionWorkspaceInheritanceMode: "strategy_only",
         status: "todo",
       }),
     );
@@ -296,6 +297,8 @@ describe("assigned backlog creation contract", () => {
           statusDefaultReason: "assigned_omitted_status",
           assignmentWakeSkipped: false,
           parentBlockerAdded: true,
+          executionWorkspaceInheritanceMode: "strategy_only",
+          inheritedExecutionWorkspaceFromIssueId: null,
         }),
       }),
     );
@@ -305,6 +308,36 @@ describe("assigned backlog creation contract", () => {
         source: "assignment",
         reason: "issue_assigned",
         payload: expect.objectContaining({ mutation: "create" }),
+      }),
+    );
+  });
+
+
+  it("records explicit child workspace linkage as an auditable continuation intent", async () => {
+    const res = await request(await createApp())
+      .post("/api/issues/parent-1/children")
+      .send({
+        title: "Continuation child",
+        assigneeAgentId,
+        executionWorkspaceInheritanceMode: "linkage",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.createChild).toHaveBeenCalledWith(
+      "parent-1",
+      expect.objectContaining({
+        title: "Continuation child",
+        executionWorkspaceInheritanceMode: "linkage",
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.child_created",
+        details: expect.objectContaining({
+          executionWorkspaceInheritanceMode: "linkage",
+          inheritedExecutionWorkspaceFromIssueId: "parent-1",
+        }),
       }),
     );
   });

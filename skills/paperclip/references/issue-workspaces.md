@@ -18,7 +18,24 @@ Read `currentExecutionWorkspace`:
 - `status` / `closedAt` — whether the workspace is usable
 - `runtimeServices[]` — current services, including `serviceName`, `status`, `healthStatus`, `url`, `port`, and `runtimeServiceId`
 
-If `currentExecutionWorkspace` is `null`, the issue does not currently have a realized execution workspace. For child/follow-up work, create the child with `parentId` or use `inheritExecutionWorkspaceFromIssueId` so Paperclip preserves workspace continuity.
+If `currentExecutionWorkspace` is `null`, the issue does not currently have a realized execution workspace. `parentId` alone creates the issue hierarchy and carries compatible project/workspace strategy context; it does **not** reuse the parent's realized `executionWorkspaceId`. An autonomous child realizes its own execution workspace when work starts.
+
+Use explicit workspace linkage only when the new work must continue in the same checkout/worktree:
+
+```json
+{ "parentId": "<parent-issue-id>" }
+```
+
+The child above is autonomous by default. For a generic issue create that must continue the parent's Git work:
+
+```json
+{
+  "parentId": "<parent-issue-id>",
+  "inheritExecutionWorkspaceFromIssueId": "<parent-issue-id>"
+}
+```
+
+For `POST /api/issues/{id}/children`, `executionWorkspaceInheritanceMode: "strategy_only"` is the autonomous default; set `executionWorkspaceInheritanceMode: "linkage"` for an explicit continuation. `reuse_existing` remains valid when that continuation is intentional.
 
 ## Control Services
 

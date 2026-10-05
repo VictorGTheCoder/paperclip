@@ -320,7 +320,7 @@ function buildReusedExecutionWorkspaceConfigPatchFromIssueSettings(
   };
 }
 
-// Accepted-plan children are not realized yet, so carry only unresolved
+// Autonomous children are not realized yet, so carry only unresolved
 // workspace intent and let the first child run render/persist its own branch.
 function buildPreRealizationExecutionWorkspaceSettings(raw: unknown): Record<string, unknown> | null {
   const settings = parseIssueExecutionWorkspaceSettings(raw, { includeEnvironmentId: true });
@@ -6711,7 +6711,7 @@ export function issueService(db: Db) {
       const {
         acceptanceCriteria,
         blockParentUntilDone,
-        executionWorkspaceInheritanceMode = "linkage",
+        executionWorkspaceInheritanceMode = "strategy_only",
         actorAgentId,
         actorUserId,
         ...issueData
@@ -7150,22 +7150,42 @@ export function issueService(db: Db) {
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
-        const workspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
+        const explicitWorkspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
           ? null
-          : inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
+          : inheritExecutionWorkspaceFromIssueId ?? null;
+        const parentWorkspaceStrategyIssueId =
+          skipExecutionWorkspaceInheritance || explicitWorkspaceInheritanceIssueId
+            ? null
+            : issueData.parentId ?? null;
+        const workspaceContextIssueId = explicitWorkspaceInheritanceIssueId ?? parentWorkspaceStrategyIssueId;
         const hasExplicitExecutionWorkspaceOverride =
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
-        if (workspaceInheritanceIssueId) {
-          const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
+        if (workspaceContextIssueId) {
+          const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceContextIssueId);
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
           }
           if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
+
+          // Parent/child hierarchy carries project and pre-realization workspace
+          // intent, but it is not permission to borrow the parent's mutable Git
+          // identity. Reusing an already-realized execution workspace requires the
+          // explicit inheritExecutionWorkspaceFromIssueId signal.
           if (
+            parentWorkspaceStrategyIssueId &&
+            isolatedWorkspacesEnabled &&
+            !hasExplicitExecutionWorkspaceOverride
+          ) {
+            executionWorkspaceSettings =
+              buildPreRealizationExecutionWorkspaceSettings(workspaceSource.executionWorkspaceSettings);
+          }
+
+          if (
+            explicitWorkspaceInheritanceIssueId &&
             isolatedWorkspacesEnabled &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId

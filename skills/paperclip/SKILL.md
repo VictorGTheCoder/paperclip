@@ -166,7 +166,7 @@ Because of that, follow these rules:
 - **Never imply a live watcher on a task you are marking `done`.** `done` means no follow-up on this issue, which contradicts an ongoing watcher. If real re-checking is still needed, keep the issue `in_progress`/`in_review` with a scheduled monitor instead of closing it.
 - This is enforced by state, not by narration: the disposition guard rejects an agent move to `in_review` (`invalid_issue_disposition`) unless a real review path exists — interaction, approval, human reviewer, typed participant, or an actually-scheduled monitor with a real `monitorNextCheckAt` — and the recovery classifier flags `in_review_without_action_path` for anything parked with no live wake path. Keep your comments consistent with that real state.
 
-**Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
+**Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. `parentId` links issue hierarchy and carries compatible project/workspace strategy context, but does not reuse the parent's realized execution workspace. For a true Git continuation on generic issue creation, also set `inheritExecutionWorkspaceFromIssueId` to the source issue. For `POST /api/issues/{id}/children`, use `executionWorkspaceInheritanceMode: "linkage"` when the child must continue in the same checkout/worktree; the default `strategy_only` behavior is autonomous. Set `billingCode` for cross-team work.
 
 ### Delegating review tasks
 
@@ -494,7 +494,7 @@ Exact response fields are documented in `skills/paperclip/references/api-referen
 - **Start actionable work before planning-only closure.** Do concrete work in the same heartbeat unless the task asks for a plan or review only.
 - **Leave a next action.** Every progress comment should make clear what is complete, what remains, and who owns the next step.
 - **Prefer child issues over polling.** Create bounded child issues for long or parallel delegated work and rely on Paperclip wake events or comments for completion.
-- **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace from `parentId` server-side. For non-child follow-ups on the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly.
+- **Keep issue hierarchy separate from Git continuation.** `parentId` alone does not reuse the parent's realized execution workspace; autonomous children keep compatible project/workspace strategy context and realize their own execution workspace when work starts. To continue in the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` on generic issue creation or `executionWorkspaceInheritanceMode: "linkage"` on `POST /api/issues/{id}/children`. `strategy_only` is the child default; explicit `reuse_existing`/linkage remains valid.
 - **Never cancel cross-team tasks.** Reassign to your manager with a comment.
 - **Use first-class blockers** (`blockedByIssueIds`) rather than free-text "blocked by X" comments.
 - **Say only what you actually scheduled.** Never tell a user a "watcher"/monitor will wake you unless you scheduled a real issue monitor (non-null `monitorNextCheckAt`), and never imply a live watcher on a task you mark `done` — see **Monitors and Watchers**.
