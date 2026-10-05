@@ -6995,3 +6995,121 @@ describeEmbeddedPostgres("issueService.addComment createdByRunId", () => {
     expect(await createdByRunIdFor(comment.id)).toBe(runId);
   });
 });
+
+
+describeEmbeddedPostgres("issueService.getAttachmentProducerRunId", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let companyId!: string;
+  let agentId!: string;
+  let issueId!: string;
+  let runA!: string;
+  let runB!: string;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-attachment-provenance-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+
+    companyId = randomUUID();
+    agentId = randomUUID();
+    issueId = randomUUID();
+    runA = randomUUID();
+    runB = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "ArtifactProducer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Artifact producer issue",
+      status: "todo",
+      priority: "medium",
+    });
+    await db.insert(heartbeatRuns).values([
+      { id: runA, companyId, agentId, status: "succeeded" },
+      { id: runB, companyId, agentId, status: "succeeded" },
+    ]);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  function attachmentActivity(attachmentId: string, runId: string, action = "issue.attachment_added") {
+    return {
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      action,
+      entityType: "issue",
+      entityId: issueId,
+      agentId,
+      runId,
+      details: { attachmentId },
+    };
+  }
+
+  it("recovers one durable producer run from attachment-added activity", async () => {
+    const attachmentId = randomUUID();
+    await db.insert(activityLog).values([
+      attachmentActivity(attachmentId, runA),
+      attachmentActivity(attachmentId, runB, "issue.comment_added"),
+    ]);
+
+    await expect(svc.getAttachmentProducerRunId({
+      attachmentId,
+      companyId,
+      issueId,
+    })).resolves.toBe(runA);
+  });
+
+  it("tolerates duplicate audit rows from the same producer run", async () => {
+    const attachmentId = randomUUID();
+    await db.insert(activityLog).values([
+      attachmentActivity(attachmentId, runA),
+      attachmentActivity(attachmentId, runA),
+    ]);
+
+    await expect(svc.getAttachmentProducerRunId({
+      attachmentId,
+      companyId,
+      issueId,
+    })).resolves.toBe(runA);
+  });
+
+  it("fails closed when more than one distinct run claims the same attachment", async () => {
+    const attachmentId = randomUUID();
+    await db.insert(activityLog).values([
+      attachmentActivity(attachmentId, runA),
+      attachmentActivity(attachmentId, runA),
+      attachmentActivity(attachmentId, runB),
+    ]);
+
+    await expect(svc.getAttachmentProducerRunId({
+      attachmentId,
+      companyId,
+      issueId,
+    })).resolves.toBeNull();
+  });
+});

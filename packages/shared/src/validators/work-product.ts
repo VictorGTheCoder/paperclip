@@ -35,10 +35,20 @@ export const issueWorkProductReviewStateSchema = z.enum([
   "changes_requested",
 ]);
 
+export const artifactEvidencePurposeSchema = z.enum(["completion", "publisher"]);
+
+export const attachmentArtifactEvidenceReferenceSchema = z.object({
+  purpose: artifactEvidencePurposeSchema,
+  producedByIssueId: z.string().guid(),
+  producedByRunId: z.string().guid(),
+});
+
 export const attachmentArtifactWorkProductMetadataSchema = z.object({
   attachmentId: z.string().guid(),
   contentType: z.string().min(1),
   byteSize: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
+  evidenceReference: attachmentArtifactEvidenceReferenceSchema.optional(),
   contentPath: z.string().min(1),
   openPath: z.string().min(1),
   downloadPath: z.string().min(1),

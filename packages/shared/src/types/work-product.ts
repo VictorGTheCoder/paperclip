@@ -59,6 +59,12 @@ export interface AttachmentArtifactWorkProductMetadata {
   attachmentId: string;
   contentType: string;
   byteSize: number;
+  sha256?: string;
+  evidenceReference?: {
+    purpose: "completion" | "publisher";
+    producedByIssueId: string;
+    producedByRunId: string;
+  };
   contentPath: string;
   openPath: string;
   downloadPath: string;

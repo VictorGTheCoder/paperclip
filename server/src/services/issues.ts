@@ -9056,6 +9056,28 @@ export function issueService(db: Db) {
         .where(eq(issueAttachments.id, id))
         .then((rows) => rows[0] ?? null),
 
+    getAttachmentProducerRunId: async (input: {
+      attachmentId: string;
+      companyId: string;
+      issueId: string;
+    }) => {
+      const rows = await db
+        .select({ runId: activityLog.runId })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, input.companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, input.issueId),
+          eq(activityLog.action, "issue.attachment_added"),
+          isNotNull(activityLog.runId),
+          sql`${activityLog.details} ->> 'attachmentId' = ${input.attachmentId}`,
+        ))
+        .groupBy(activityLog.runId)
+        .limit(2);
+      const runIds = rows.map((row) => row.runId).filter((runId): runId is string => Boolean(runId));
+      return runIds.length === 1 ? runIds[0] : null;
+    },
+
     removeAttachment: async (id: string) =>
       db.transaction(async (tx) => {
         const existing = await tx
