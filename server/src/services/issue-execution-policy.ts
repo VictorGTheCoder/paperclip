@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type {
   IssueExecutionDecision,
   IssueExecutionMonitorClearReason,
@@ -1251,7 +1252,25 @@ export function buildIssueMonitorClearedPatch(input: {
   };
 }
 
+function isPassiveBlockedIssueUpdate(input: TransitionInput) {
+  if (input.issue.status !== "blocked" || input.requestedStatus !== undefined) return false;
+  const requestedAssigneePatchProvided =
+    input.requestedAssigneePatch.assigneeAgentId !== undefined ||
+    input.requestedAssigneePatch.assigneeUserId !== undefined;
+  if (requestedAssigneePatchProvided || input.reviewRequest !== undefined || input.monitorExplicitlyUpdated) {
+    return false;
+  }
+
+  const previousPolicy = input.previousPolicy ?? normalizeIssueExecutionPolicy(input.issue.executionPolicy ?? null);
+  return isDeepStrictEqual(input.policy, previousPolicy);
+}
+
 export function applyIssueExecutionPolicyTransition(input: TransitionInput): TransitionResult {
+  // Blocked is an explicit durable disposition. Passive edits such as
+  // title/description changes must not interpret the pending execution stage
+  // as drift and silently reactivate it.
+  if (isPassiveBlockedIssueUpdate(input)) return { patch: {} };
+
   const stageResult = applyIssueExecutionStageTransition(input);
   const monitorPatch = applyMonitorTransition(input, stageResult.patch);
   Object.assign(stageResult.patch, monitorPatch);
