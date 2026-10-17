@@ -8,13 +8,15 @@ export async function testAgentSetup(input: {
   companyId: string;
   agentId?: string;
   adapterType: string;
+  runner?: import("@paperclipai/shared").AgentRunnerChoice;
   providerAdapter: string;
   adapterConfig: Record<string, unknown>;
-  aiConnection?: import("@paperclipai/shared").AiConnectionBinding;
+  aiConnection?: import("@paperclipai/shared").AiRuntimeConnectionBinding;
   testCredentials?: Record<string, string>;
   environmentId: string | null;
 }): Promise<AdapterEnvironmentTestResult> {
   const payload = {
+    ...(input.runner ? { runner: input.runner } : {}),
     ...(input.agentId ? { agentId: input.agentId } : {}),
     ...(input.aiConnection ? { aiConnection: input.aiConnection } : {}),
     adapterConfig: input.adapterConfig,
@@ -27,6 +29,7 @@ export async function testAgentSetup(input: {
     payload,
   );
   if (
+    input.aiConnection?.mode === "router" ||
     runtime.status === "fail" ||
     runtime.checks.some(
       (check) => check.code === ADAPTER_AUTH_MISSING_CHECK_CODE,
@@ -40,6 +43,7 @@ export async function testAgentSetup(input: {
     input.providerAdapter,
     {
       ...payload,
+      runner: "legacy",
       adapterConfig: {
         ...input.adapterConfig,
         engine: "cli",
@@ -58,7 +62,7 @@ export async function testAgentSetup(input: {
     ).values(),
   ];
   return {
-    adapterType: input.adapterType,
+    adapterType: runtime.adapterType,
     testedAt: provider.testedAt,
     status:
       provider.status === "fail"

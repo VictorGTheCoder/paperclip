@@ -356,8 +356,13 @@ async function promoteDeferredWake(
   // after completion; it cannot revive a cancelled task. Other stale
   // continuations cannot revive assignee execution. Cancel before claiming promotion so
   // the compare-and-set still sees the deferred wake.
+  const onboardingResultReport = currentIssue.status === "done" && currentIssue.originKind === "onboarding_first_task" &&
+    await ports.transaction.isCompletedOnboardingHandoffWake({ companyId: run.companyId, issueId: currentIssue.id,
+      agentId: workingCandidate.agentId, reason: workingCandidate.wakeReason ?? workingCandidate.reason,
+      contextSnapshot: workingCandidate.deferredContextSeed });
   if (
     !shouldReopen &&
+    !onboardingResultReport &&
     (currentIssue.status === "done" || currentIssue.status === "cancelled") &&
     workingCandidate.agentId === currentIssue.assigneeAgentId
   ) {
@@ -488,7 +493,13 @@ async function runReleaseRecoveryTail(
   input: ReleaseIssueExecutionInput,
   postCommitEffects: PostCommitEffect[],
 ): Promise<ReleaseTransactionResult> {
-  const suppressImmediateRecovery = input.suppressImmediateRecovery === true || Boolean(
+  // A run a person deliberately stopped (board cancel, operator interrupt, agent
+  // pause) is not stranded work. Re-queuing it here re-created the cancelled wake
+  // within a second of the cancel (issue_continuation_needed / assignment_recovery),
+  // and for a paused agent escalated the issue to `blocked`. The periodic sweep
+  // already stands down for operator cancels; this keeps release consistent.
+  const operatorStopped = run.status === "cancelled" && run.operatorStopped === true;
+  const suppressImmediateRecovery = input.suppressImmediateRecovery === true || operatorStopped || Boolean(
     issue.conversationAgentId && issue.conversationUserId &&
     issue.conversationState === "waiting" && issue.status === "in_review"
   );
