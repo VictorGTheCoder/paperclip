@@ -2284,8 +2284,10 @@ function renderPaperclipWakePromptBody(
     normalized.requestedCount > 0;
   const executionStage = normalized.executionStage;
   const recovery = normalized.recovery;
+  // Owner disposition repairs continue admitted work; operational recovery keeps its narrower contract.
   const recoveryScoped = Boolean(
-    recovery || normalized.reason === "source_scoped_recovery_action",
+    (recovery || normalized.reason === "source_scoped_recovery_action") &&
+    !(normalized.dispositionRepair && recovery?.cause === "deliberate_wait_without_target"),
   );
   // Ordinary resumed sessions receive compact assignment markdown, so an
   // objective whose source is absent from the delta remains necessary. Fresh,

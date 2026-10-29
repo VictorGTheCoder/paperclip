@@ -914,6 +914,22 @@ describe("runChildProcess", () => {
 });
 
 describe("renderPaperclipWakePrompt", () => {
+  it.each([false, true])("keeps owner disposition repair productive (resumed=%s)", resumedSession => {
+    const payload = {
+      reason: "issue_disposition_repair",
+      issue: { id: "issue-1", title: "Prepare specification", status: "in_progress" },
+      recovery: { cause: "deliberate_wait_without_target" },
+      dispositionRepair: { attempt: 1, maxAttempts: 2, sourceRunId: "run-1", instruction: "Record a durable disposition or a supported next execution path." },
+    };
+    const prompt = renderPaperclipWakePrompt(payload, { resumedSession });
+    expect(prompt).toContain("Task disposition repair:");
+    expect(prompt).toContain(payload.dispositionRepair.instruction);
+    expect(prompt).not.toContain("your job is to RECOVER this task, not to do the work");
+    expect(prompt).not.toContain("Fallback preference order:");
+    const operational = renderPaperclipWakePrompt({ ...payload, recovery: { cause: "workspace_validation_failed" } }, { resumedSession });
+    expect(operational).toContain("your job is to RECOVER this task, not to do the work");
+  });
+
   it("leaves conversation disposition and accepted-plan handoff to the injected chat policy", () => {
     const payload = {
       reason: "issue_commented",

@@ -1691,3 +1691,20 @@ per-call write approval, records activity, and dispatches the existing continuat
 An unauthorized approver receives 403; changed tool definitions, assignment,
 identity, or a closed task receive 409; unrelated connections receive 404.
 No credentials or provider authorization URL appear in the card payload.
+
+### Resolve an existing recovery action
+
+Read `GET /api/issues/{issueId}/recovery-actions`, then use
+`POST /api/issues/{issueId}/recovery-actions/resolve` with your own run credentials
+and `X-Paperclip-Run-Id`. The action ID belongs in the body, not the URL:
+
+```json
+{"actionId":"<active-action-id>","outcome":"restored","sourceIssueStatus":"todo","resolutionNote":"<verified repair and concrete next action>"}
+```
+
+The native CLI subcommand `issue recovery:resolve` calls this same endpoint.
+`retry` is not an accepted outcome. Native permissions, Stop, dependency,
+reconciliation and exhausted-recovery gates still apply; a refused restoration
+is not permission to reset counters. A productive owner disposition repair
+continues admitted work in its current run instead of resolving merely to
+request another run. Verify source state and any successor execution afterward.
