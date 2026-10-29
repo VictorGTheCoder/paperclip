@@ -1,11 +1,11 @@
-name: Frozen recovery qualification
-run-name: Frozen recovery qualification 48bb4e1be vs bba6a45f0
+name: Interaction wake qualification
+run-name: Interaction wake qualification b194894d5 vs bba6a45f0
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: frozen-recovery-qualification-20261029
+  group: interaction-wake-qualification-20261029
   cancel-in-progress: false
 jobs:
   qualification:
@@ -19,12 +19,14 @@ jobs:
           - label: baseline
             sha: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
           - label: candidate
-            sha: 48bb4e1bef4b5f032cb5bd75d5958356750ffb8d
+            sha: b194894d5560b569f2985d72d8c094413ab0afd4
     env:
       CI: 'true'
       CARGO_BUILD_JOBS: '2'
       PAPERCLIP_TELEMETRY_DISABLED: '1'
       DO_NOT_TRACK: '1'
+      GOMEMLIMIT: '6GiB'
+      NODE_OPTIONS: '--max-old-space-size=8192'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -47,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p qualification-evidence
-          git fetch --no-tags --depth=1 origin bba6a45f0d364cfd962ac59b3bdf2426a8222adb 48bb4e1bef4b5f032cb5bd75d5958356750ffb8d
+          git fetch --no-tags --depth=1 origin bba6a45f0d364cfd962ac59b3bdf2426a8222adb b194894d5560b569f2985d72d8c094413ab0afd4
           python3 - <<'PY'
           import hashlib,json,os,pathlib,shutil,socket,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
@@ -57,14 +59,14 @@ jobs:
           mem=dict(line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
           ram=int(mem['MemTotal'].strip().split()[0])*1024
           sock=socket.socket(); sock.settimeout(2); port_open=sock.connect_ex(('127.0.0.1',3100))==0; sock.close()
-          patch=subprocess.check_output(['git','diff','--no-ext-diff','--full-index','--binary','bba6a45f0d364cfd962ac59b3bdf2426a8222adb','48bb4e1bef4b5f032cb5bd75d5958356750ffb8d','--'])
-          names=git('diff','--name-only','bba6a45f0d364cfd962ac59b3bdf2426a8222adb','48bb4e1bef4b5f032cb5bd75d5958356750ffb8d').splitlines()
+          patch=subprocess.check_output(['git','diff','--no-ext-diff','--full-index','--binary','bba6a45f0d364cfd962ac59b3bdf2426a8222adb','b194894d5560b569f2985d72d8c094413ab0afd4','--'])
+          names=git('diff','--name-only','bba6a45f0d364cfd962ac59b3bdf2426a8222adb','b194894d5560b569f2985d72d8c094413ab0afd4').splitlines()
           record={'expectedSha':expected,'actualSha':actual,'tree':git('rev-parse','HEAD^{tree}'),'label':os.environ['QUALIFICATION_LABEL'],'ramBytes':ram,'diskFreeBytes':shutil.disk_usage('.').free,'hostname':socket.gethostname(),'productionPathExists':{x:pathlib.Path(x).exists() for x in production_paths},'sensitiveEnvironmentPresence':{x:x in os.environ for x in sensitive},'localProductionPort3100Open':port_open,'canonicalDiffSha256':hashlib.sha256(patch).hexdigest(),'candidateChangedPaths':names,'workflowRef':os.environ.get('GITHUB_WORKFLOW_REF'),'workflowSha':os.environ.get('GITHUB_WORKFLOW_SHA'),'realACPExecuted':False,'providerCredentialInjected':False,'isolationScope':'Fresh hosted VM and absent production filesystem/credentials; no claim of a qualified real ACP sandbox or unrestricted-network isolation.'}
           pathlib.Path('qualification-evidence/identity.json').write_text(json.dumps(record,indent=2))
           pathlib.Path('qualification-evidence/canonical.patch').write_bytes(patch)
           assert actual==expected
-          assert record['canonicalDiffSha256']=='582c3dcd10c77d42c742643d498a6ec3ea2fe3c9cb8dd853a1f445d61ce3ed18'
-          assert sorted(names)==sorted(['packages/adapter-utils/src/server-utils.ts','packages/adapter-utils/src/server-utils.test.ts','skills/paperclip/references/api-reference.md'])
+          assert record['canonicalDiffSha256']=='0478b12f70e775a28fec21aa2ad5f5df421ec8f6ae603fa3cfb07e5e57722757'
+          assert sorted(names)==sorted(['docs/api/issues.md', 'server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts', 'server/src/modules/run-dispatch/adapters/postgres.ts', 'server/src/modules/run-dispatch/domain/policy.ts', 'server/src/services/heartbeat.ts', 'server/src/services/pending-addressee-wake.ts', 'server/src/services/question-response-delivery.ts'])
           assert ram>=12*1024**3, 'Hosted runner has insufficient RAM'
           assert record['diskFreeBytes']>=10*1024**3, 'Hosted runner has insufficient free disk'
           assert not any(record['productionPathExists'].values())
@@ -106,6 +108,27 @@ jobs:
           status=${PIPESTATUS[0]}
           printf '%s\n' "$status" > qualification-evidence/typecheck.exit
           exit "$status"
+      - name: Native recipient negative control and acceptance
+        id: acceptance
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          QUALIFICATION_LABEL: ${{ matrix.label }}
+        run: |
+          set +e
+          if [ "$QUALIFICATION_LABEL" = baseline ]; then filter='11932 native enqueue starts the actual addressed question run'; else filter='11932'; fi
+          (cd server && ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t "$filter" --testTimeout=45000 --reporter=json --outputFile=../qualification-evidence/acceptance.json) > qualification-evidence/acceptance.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > qualification-evidence/acceptance-command.exit
+          python3 - <<'PY'
+          import json,os,pathlib
+          d=json.loads(pathlib.Path('qualification-evidence/acceptance.json').read_text())
+          messages='\n'.join(m for r in d['testResults'] for t in r.get('assertionResults',[]) for m in t.get('failureMessages',[]))
+          if os.environ['QUALIFICATION_LABEL']=='baseline':
+              assert d['numFailedTests']==1 and 'issue_assignee_changed' in messages, d
+          else:
+              assert d['numPassedTests']==27 and d['numFailedTests']==0, d
+          PY
       - name: Preserve final source status
         if: always()
         run: |
@@ -118,7 +141,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: frozen-recovery-${{ matrix.label }}-${{ matrix.sha }}
+          name: interaction-wake-${{ matrix.label }}-${{ matrix.sha }}
           path: qualification-evidence/
           retention-days: 90
       - name: Qualification result
@@ -128,10 +151,11 @@ jobs:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
           TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
         run: |
           python3 - <<'PY'
           import json,os,pathlib
-          result={x:os.environ.get(x) for x in ['IDENTITY_OUTCOME','INSTALL_OUTCOME','BUILD_OUTCOME','TYPECHECK_OUTCOME']}
+          result={x:os.environ.get(x) for x in ['IDENTITY_OUTCOME','INSTALL_OUTCOME','BUILD_OUTCOME','TYPECHECK_OUTCOME','ACCEPTANCE_OUTCOME']}
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(json.dumps(result,indent=2)+'\n')
           assert all(x=='success' for x in result.values()), result
           assert pathlib.Path('qualification-evidence/lockfile-diff.patch').read_text()==''
