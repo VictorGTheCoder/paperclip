@@ -1692,7 +1692,7 @@ An unauthorized approver receives 403; changed tool definitions, assignment,
 identity, or a closed task receive 409; unrelated connections receive 404.
 No credentials or provider authorization URL appear in the card payload.
 
-### Resolve an existing recovery action
+**Recovery-action resolution (existing API).**
 
 Read `GET /api/issues/{issueId}/recovery-actions`, then use
 `POST /api/issues/{issueId}/recovery-actions/resolve` with your own run credentials
