@@ -36,7 +36,7 @@ jobs:
           echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git rev-parse HEAD > evidence/source-sha.txt
           git rev-parse HEAD^{tree} > evidence/source-tree.txt
-          git status --porcelain > evidence/initial-status.txt
+          git status --porcelain --untracked-files=no > evidence/initial-status.txt
           test ! -s evidence/initial-status.txt
           git fetch --depth=1 origin "$GITHUB_WORKFLOW_SHA"
           git show "$GITHUB_WORKFLOW_SHA":.github/qualification/package-maintenance.ts > .github/package-maintenance.ts
@@ -47,6 +47,7 @@ jobs:
           pnpm --version > evidence/pnpm.txt
           sha256sum pnpm-lock.yaml > evidence/lock.sha256
       - name: Frozen install
+        id: install
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee evidence/install.log
@@ -57,7 +58,7 @@ jobs:
           pnpm -r --workspace-concurrency=1 build 2>&1 | tee evidence/build.log
           echo 0 > evidence/build.exit
       - name: Complete typecheck
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           set -o pipefail
           pnpm -r --workspace-concurrency=1 typecheck 2>&1 | tee evidence/typecheck.log
