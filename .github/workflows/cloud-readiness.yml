@@ -1,14 +1,77 @@
-name: Interaction wake qualification
-run-name: Interaction wake qualification b194894d5 vs bba6a45f0
+name: Conditional interaction wake qualification
+run-name: Conditional dependency-overlay qualification b194894d5 vs bba6a45f0
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: interaction-wake-qualification-20261029
+  group: interaction-wake-lock-overlay-20261029
   cancel-in-progress: false
 jobs:
+  dependency_overlay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      lock_sha: ${{ steps.verify.outputs.lock_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: VictorGTheCoder/paperclip
+          ref: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Resolve one common dependency overlay without lifecycle scripts
+        run: |
+          set -euo pipefail
+          mkdir -p dependency-evidence
+          cp pnpm-lock.yaml dependency-evidence/original-lock.yaml
+          pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts 2>&1 | tee dependency-evidence/resolution.log
+          cp pnpm-lock.yaml dependency-evidence/repaired-lock.yaml
+          git diff -- pnpm-lock.yaml > dependency-evidence/lock-repair.patch
+      - name: Verify only the missing importer entries and new graph closure changed
+        id: verify
+        run: |
+          set -euo pipefail
+          python3 -m pip install --target /tmp/qualification-yaml PyYAML==6.0.3
+          PYTHONPATH=/tmp/qualification-yaml python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,yaml
+          root=pathlib.Path('dependency-evidence')
+          old=yaml.safe_load((root/'original-lock.yaml').read_text()); new=yaml.safe_load((root/'repaired-lock.yaml').read_text())
+          missing={'@modelcontextprotocol/sdk','light-my-request'}
+          def unchanged_existing(a,b,label):
+              for k,v in a.items():
+                  assert k in b and b[k]==v, f'{label}: existing entry changed: {k}'
+          for section in set(old)|set(new):
+              if section not in {'importers','packages','snapshots'}: assert old.get(section)==new.get(section),section
+          for importer,value in old['importers'].items():
+              if importer!='server': assert new['importers'][importer]==value,importer
+          assert set(old['importers'])==set(new['importers'])
+          a=old['importers']['server']; b=new['importers']['server']
+          for section in set(a)|set(b):
+              if section!='dependencies': assert a.get(section)==b.get(section),section
+          unchanged_existing(a['dependencies'],b['dependencies'],'server dependencies')
+          assert set(b['dependencies'])-set(a['dependencies'])==missing
+          for section in ['packages','snapshots']: unchanged_existing(old[section],new[section],section)
+          changed=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines(); assert changed==['pnpm-lock.yaml'],changed
+          digest=hashlib.sha256((root/'repaired-lock.yaml').read_bytes()).hexdigest()
+          record={'classification':'conditional common dependency overlay; original frozen commits remain unqualified', 'baseline':'bba6a45f0d364cfd962ac59b3bdf2426a8222adb','lockSha256':digest,'missingImporterEntries':{k:b['dependencies'][k] for k in sorted(missing)},'existingLockedEntriesUnchanged':True,'addedPackages':sorted(set(new['packages'])-set(old['packages'])),'addedSnapshots':sorted(set(new['snapshots'])-set(old['snapshots']))}
+          (root/'manifest.json').write_text(json.dumps(record,indent=2))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('lock_sha='+digest+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: common-dependency-overlay
+          path: dependency-evidence/
+          retention-days: 30
   qualification:
+    needs: dependency_overlay
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -76,6 +139,25 @@ jobs:
           node --version > qualification-evidence/node-version.txt
           pnpm --version > qualification-evidence/pnpm-version.txt
           git status --porcelain > qualification-evidence/source-initial-status.txt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: common-dependency-overlay
+          path: dependency-overlay/
+      - name: Apply the verified identical dependency overlay
+        env:
+          EXPECTED_LOCK_SHA: ${{ needs.dependency_overlay.outputs.lock_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,shutil
+          lock=pathlib.Path('dependency-overlay/repaired-lock.yaml')
+          manifest=json.loads(pathlib.Path('dependency-overlay/manifest.json').read_text())
+          digest=hashlib.sha256(lock.read_bytes()).hexdigest()
+          assert digest==manifest['lockSha256']==os.environ['EXPECTED_LOCK_SHA']
+          assert hashlib.sha256(pathlib.Path('pnpm-lock.yaml').read_bytes()).digest()==hashlib.sha256(pathlib.Path('dependency-overlay/original-lock.yaml').read_bytes()).digest()
+          shutil.copyfile(lock,'pnpm-lock.yaml')
+          shutil.copyfile('dependency-overlay/manifest.json','qualification-evidence/dependency-overlay.json')
+          PY
       - name: Install exact locked dependencies
         id: install
         continue-on-error: true
@@ -158,7 +240,9 @@ jobs:
           result={x:os.environ.get(x) for x in ['IDENTITY_OUTCOME','INSTALL_OUTCOME','BUILD_OUTCOME','TYPECHECK_OUTCOME','ACCEPTANCE_OUTCOME']}
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(json.dumps(result,indent=2)+'\n')
           assert all(x=='success' for x in result.values()), result
-          assert pathlib.Path('qualification-evidence/lockfile-diff.patch').read_text()==''
-          import subprocess
-          subprocess.run(['git','diff','--exit-code','HEAD','--'],check=True)
+          import hashlib,subprocess
+          manifest=json.loads(pathlib.Path('qualification-evidence/dependency-overlay.json').read_text())
+          assert hashlib.sha256(pathlib.Path('pnpm-lock.yaml').read_bytes()).hexdigest()==manifest['lockSha256']
+          assert subprocess.check_output(['git','diff','--name-only','HEAD'],text=True).splitlines()==['pnpm-lock.yaml']
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('Conditional dependency-overlay result only; strict unmodified-source install failed in run 40968061121.\n')
           PY
