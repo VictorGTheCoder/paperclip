@@ -26,12 +26,19 @@ jobs:
         with:
           node-version: 24.21.0
           package-manager-cache: false
-      - name: Resolve one common dependency overlay without lifecycle scripts
+      - name: Apply the pinned common dependency overlay without lifecycle scripts
         run: |
           set -euo pipefail
           mkdir -p dependency-evidence
           cp pnpm-lock.yaml dependency-evidence/original-lock.yaml
-          pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts 2>&1 | tee dependency-evidence/resolution.log
+          git fetch --no-tags --depth=1 origin "$GITHUB_WORKFLOW_SHA"
+          git show "$GITHUB_WORKFLOW_SHA":.github/qualification/bba-lock-repair.patch > dependency-evidence/pinned-lock-repair.patch
+          python3 - <<'PY'
+          import hashlib,pathlib
+          assert hashlib.sha256(pathlib.Path('dependency-evidence/pinned-lock-repair.patch').read_bytes()).hexdigest()=='149b76b1575292ec199cc42014bbdef4e4f9b3cf307e9e0a4e8dbf430207b2f6'
+          PY
+          git apply --check dependency-evidence/pinned-lock-repair.patch
+          git apply dependency-evidence/pinned-lock-repair.patch
           cp pnpm-lock.yaml dependency-evidence/repaired-lock.yaml
           git diff -- pnpm-lock.yaml > dependency-evidence/lock-repair.patch
       - name: Verify only the missing importer entries and new graph closure changed
@@ -198,10 +205,17 @@ jobs:
           QUALIFICATION_LABEL: ${{ matrix.label }}
         run: |
           set +e
+          regression=server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
+          if [ "$QUALIFICATION_LABEL" = baseline ]; then
+            git show b194894d5560b569f2985d72d8c094413ab0afd4:"$regression" > "$regression"
+            git diff -- "$regression" > qualification-evidence/regression-only-overlay.patch
+          fi
+          sha256sum "$regression" > qualification-evidence/regression-test.sha256
           if [ "$QUALIFICATION_LABEL" = baseline ]; then filter='11932 native enqueue starts the actual addressed question run'; else filter='11932'; fi
           (cd server && ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t "$filter" --testTimeout=45000 --reporter=json --outputFile=../qualification-evidence/acceptance.json) > qualification-evidence/acceptance.log 2>&1
           status=$?
           printf '%s\n' "$status" > qualification-evidence/acceptance-command.exit
+          git restore --source=HEAD -- "$regression"
           python3 - <<'PY'
           import json,os,pathlib
           d=json.loads(pathlib.Path('qualification-evidence/acceptance.json').read_text())
