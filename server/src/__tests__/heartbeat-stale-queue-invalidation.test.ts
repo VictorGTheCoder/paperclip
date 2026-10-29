@@ -30,6 +30,7 @@ import {
   heartbeatService,
 } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
+import * as pendingAddresseeWake from "../services/pending-addressee-wake.js";
 import { questionResponseDeliveryService } from "../services/question-response-delivery.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { recoveryService } from "../services/recovery/service.ts";
@@ -1977,6 +1978,165 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(1);
     expect(run.contextSnapshot).toMatchObject({ interactionId: f.interaction.id });
     expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].assigneeAgentId).toBe(f.architect);
+  });
+
+  // The previous boundary cases changed state before claim or held an unchanged
+  // row. These cases run real verdict transactions against the final claim lock.
+  async function seedClaimRace(comments: boolean) {
+    const f = await seedAddressedQuestion();
+    await db.update(issueThreadInteractions).set({ continuationPolicy: "none" })
+      .where(eq(issueThreadInteractions.id, f.interaction.id));
+    const commentId = randomUUID();
+    if (comments) await db.insert(issueComments).values({ id: commentId, companyId: f.companyId,
+      issueId: f.issueId, authorUserId: "local-board", authorType: "user", body: "Deliver this message once." });
+    const queued = await seedQueuedRun({ companyId: f.companyId, agentId: f.victor,
+      issueId: f.issueId, wakeReason: "interaction_pending", invocationSource: "automation",
+      contextExtras: { interactionId: f.interaction.id, ...(comments ? { wakeCommentIds: [commentId] } : {}) } });
+    if (comments) await db.update(agentWakeupRequests).set({
+      payload: withQueuedCommentIdsInWakePayload({ issueId: f.issueId }, [commentId]),
+    }).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
+    return { ...f, ...queued, commentId };
+  }
+
+  it.each([
+    { comments: false, verdict: "answer" }, { comments: true, verdict: "answer" },
+    { comments: false, verdict: "cancel" }, { comments: true, verdict: "cancel" },
+  ])("11932 concurrency: verdict wins final claim ($verdict, comments=$comments)", async ({ comments, verdict }) => {
+    const f = await seedClaimRace(comments);
+    let release!: () => void; let locked!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const ready = new Promise<void>(r => { locked = r; });
+    let writer: Promise<unknown> | null = null;
+    beforePendingClaim = async () => {
+      const service = issueThreadInteractionService(db);
+      const scope = { id: f.issueId, companyId: f.companyId };
+      const hooks = { afterResolveInTransaction: async () => { locked(); await gate; } };
+      writer = verdict === "answer"
+        ? service.answerQuestions(scope, f.interaction.id,
+          { answers: [{ questionId: "scope", optionIds: ["yes"] }] }, { userId: "local-board" }, hooks)
+        : service.cancelQuestions(scope, f.interaction.id, { reason: "Concurrent board cancellation" },
+          { userId: "local-board" }, hooks);
+      await Promise.race([ready, writer.then(() => { throw new Error("verdict escaped its barrier"); })]);
+    };
+    let claimReturned = false;
+    const claiming = heartbeat.resumeQueuedRuns();
+    claiming.then(() => { claimReturned = true; }, () => { claimReturned = true; });
+    try {
+      expect(await waitForCondition(async () => writer !== null, 10000)).toBe(true);
+      await ready;
+      // Verdict outbox foreign keys can hold an issue KEY SHARE lock. A
+      // queued-comment claim may correctly wait at its issue FOR UPDATE before
+      // reaching the interaction NOWAIT check. Release the writer independently
+      // rather than making progress depend on the claim returning first.
+      expect(await waitForCondition(async () => {
+        if (claimReturned) return true;
+        const [row] = await db.execute<{ waiting: boolean }>(sql`select exists (
+          select 1 from pg_stat_activity where state = 'active' and wait_event_type = 'Lock'
+            and query ilike '%issues%for update%'
+        ) as waiting`);
+        return row.waiting;
+      }, 10000)).toBe(true);
+      const blocked = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0];
+      expect(blocked).toMatchObject({ status: "queued", startedAt: null });
+      expect(countExecuteCallsForRun(f.runId)).toBe(0);
+    } finally { release(); await writer; await claiming; }
+    expect((await db.select().from(issueThreadInteractions)
+      .where(eq(issueThreadInteractions.id, f.interaction.id)))[0].status).toBe(verdict === "answer" ? "answered" : "cancelled");
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Preserved user input delivered", provider: "test", model: "test-model" };
+    });
+    // Concurrent scheduler workers must produce one cancellation/receipt and
+    // one delivery, including when the assignee has no prior execution history.
+    await Promise.all([heartbeat.resumeQueuedRuns(), heartbeat.resumeQueuedRuns()]);
+    await Promise.all([heartbeat.resumeQueuedRuns(), heartbeat.resumeQueuedRuns()]);
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const source = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0];
+    expect(source).toMatchObject({ status: "cancelled", errorCode: "issue_assignee_changed", startedAt: null });
+    expect(countExecuteCallsForRun(f.runId)).toBe(0);
+    const owners = (await db.select().from(heartbeatRuns)).filter(r => r.agentId === f.architect);
+    expect(owners).toHaveLength(comments ? 1 : 0);
+    if (comments) {
+      expect(owners[0].status).toBe("succeeded");
+      expect(countExecuteCallsForRun(owners[0].id)).toBe(1);
+      expect(owners[0].contextSnapshot?.wakeCommentIds).toEqual([f.commentId]);
+      const receipts = (await db.select().from(agentWakeupRequests))
+        .filter(w => w.idempotencyKey === `stale-addressee-requeue:${f.runId}`);
+      expect(receipts).toHaveLength(1);
+      expect(["coalesced", "claimed", "completed", "succeeded"]).toContain(receipts[0].status);
+    }
+    await heartbeat.resumeQueuedRuns();
+    expect((await db.select().from(heartbeatRuns)).filter(r => r.agentId === f.architect)).toHaveLength(comments ? 1 : 0);
+  });
+
+  it.each([false, true])("11932 concurrency: final claim wins before response (comments=%s)", async (comments) => {
+    const f = await seedClaimRace(comments);
+    const original = pendingAddresseeWake.verifyPendingAddresseeWake;
+    let releaseClaim!: () => void; let releaseProvider!: () => void;
+    const claimGate = new Promise<void>(r => { releaseClaim = r; });
+    const providerGate = new Promise<void>(r => { releaseProvider = r; });
+    let insideLockedClaim = false;
+    const spy = vi.spyOn(pendingAddresseeWake, "verifyPendingAddresseeWake").mockImplementation(async (tx, input) => {
+      const verified = await original(tx, input);
+      if (verified && input.lock && input.runId === f.runId && !insideLockedClaim) {
+        insideLockedClaim = true;
+        await claimGate; // actual issue + interaction locks remain held
+      }
+      return verified;
+    });
+    mockAdapterExecute.mockImplementation(async () => {
+      await providerGate;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Claim linearized before response", provider: "test", model: "test-model" };
+    });
+    let writer: Promise<unknown> | null = null;
+    let runObservedByResolver: { status: string; startedAt: Date | null } | null = null;
+    const claiming = heartbeat.resumeQueuedRuns();
+    try {
+      expect(await waitForCondition(async () => insideLockedClaim, 10000)).toBe(true);
+      writer = issueThreadInteractionService(db).answerQuestions({ id: f.issueId, companyId: f.companyId },
+        f.interaction.id, { answers: [{ questionId: "scope", optionIds: ["yes"] }] },
+        { userId: "local-board" }, { afterResolveInTransaction: async tx => {
+          runObservedByResolver = (await tx.select({ status: heartbeatRuns.status, startedAt: heartbeatRuns.startedAt })
+            .from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0];
+        } });
+      expect(await waitForCondition(async () => {
+        const [row] = await db.execute<{ waiting: boolean }>(sql`select exists (
+          select 1 from pg_stat_activity where state = 'active' and wait_event_type = 'Lock'
+            and query ilike '%update%issue_thread_interactions%'
+        ) as waiting`);
+        return row.waiting;
+      }, 10000)).toBe(true);
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0].status).toBe("queued");
+      expect(countExecuteCallsForRun(f.runId)).toBe(0);
+      releaseClaim();
+      await claiming;
+      await writer;
+      expect(runObservedByResolver).toMatchObject({ status: "running" });
+      expect(runObservedByResolver?.startedAt).toBeInstanceOf(Date);
+      // Environment/tool preparation follows the committed claim and is not a
+      // bounded 10-second dispatch contract. Verify eventual execution after
+      // releasing the provider barrier, rather than imposing a latency limit.
+    } finally {
+      releaseClaim(); releaseProvider();
+      await claiming;
+      await writer;
+      spy.mockRestore();
+    }
+    await heartbeat.waitForRunExecutionDrain(f.runId);
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0].status).toBe("succeeded");
+    expect(countExecuteCallsForRun(f.runId)).toBe(1);
+    if (comments) {
+      const [ctx] = mockAdapterExecute.mock.calls.find(([ctx]) => ctx.runId === f.runId)!;
+      expect(ctx.context?.wakeCommentIds ?? ctx.contextSnapshot?.wakeCommentIds ??
+        (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0].contextSnapshot?.wakeCommentIds)
+        .toEqual([f.commentId]);
+    }
+    await heartbeat.resumeQueuedRuns();
+    expect((await db.select().from(heartbeatRuns)).filter(r => r.agentId === f.architect)).toHaveLength(0);
+    expect(countExecuteCallsForRun(f.runId)).toBe(1);
   });
 
 });
