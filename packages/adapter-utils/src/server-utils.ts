@@ -2284,10 +2284,16 @@ function renderPaperclipWakePromptBody(
     normalized.requestedCount > 0;
   const executionStage = normalized.executionStage;
   const recovery = normalized.recovery;
-  // Owner disposition repairs continue admitted work; operational recovery keeps its narrower contract.
+  // Stale repair metadata cannot override a native wait or a non-actionable task state.
+  const pendingNativeInteraction = normalized.interactionStatus === "pending" ||
+    normalized.planReviewContext?.interaction?.status === "pending" ||
+    normalized.documentReviewContext?.documents.some(document => document.interaction?.status === "pending");
+  const productiveOwnerRepair = normalized.dispositionRepair &&
+    recovery?.cause === "deliberate_wait_without_target" &&
+    ["todo", "in_progress"].includes(normalized.issue?.status ?? "") &&
+    !pendingNativeInteraction;
   const recoveryScoped = Boolean(
-    (recovery || normalized.reason === "source_scoped_recovery_action") &&
-    !(normalized.dispositionRepair && recovery?.cause === "deliberate_wait_without_target"),
+    (recovery || normalized.reason === "source_scoped_recovery_action") && !productiveOwnerRepair,
   );
   // Ordinary resumed sessions receive compact assignment markdown, so an
   // objective whose source is absent from the delta remains necessary. Fresh,

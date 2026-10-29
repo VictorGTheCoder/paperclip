@@ -914,6 +914,40 @@ describe("runChildProcess", () => {
 });
 
 describe("renderPaperclipWakePrompt", () => {
+  it.each(["spec", "ticket-breakdown"])("preserves an identifiable pending %s approval even with stale repair metadata", documentKey => {
+    for (const resumedSession of [false, true]) for (const status of ["in_progress", "in_review"]) {
+      const revisionId = "pending-exact-revision";
+      const prompt = renderPaperclipWakePrompt({
+        reason: "issue_disposition_repair",
+        issue: { id: "issue-1", title: "Await Victor approval", status },
+        recovery: { cause: "deliberate_wait_without_target" },
+        dispositionRepair: { attempt: 1, maxAttempts: 2, sourceRunId: "run-1", instruction: "Respect pending approvals." },
+        planReviewContext: { issueId: "issue-1", documentKey, latestRevisionId: revisionId,
+          interaction: { id: "confirmation-1", kind: "request_confirmation", status: "pending",
+            target: { issueId: "issue-1", documentId: "doc-1", key: documentKey, revisionId } } },
+      }, { resumedSession });
+      expect(prompt).toContain("Do not produce the deliverable yourself.");
+      expect(prompt).toContain("request_confirmation pending");
+      expect(prompt).toContain(revisionId);
+      expect(prompt).not.toContain("- accepted target:");
+    }
+  });
+
+  it.each(["document", "wake"])("preserves a pending native interaction supplied through %s context", kind => {
+    const review = { issueId: "issue-1", documentKey: "spec", latestRevisionId: "revision-1",
+      interaction: { id: "confirmation-1", kind: "request_confirmation", status: "pending",
+        target: { issueId: "issue-1", documentId: "doc-1", key: "spec", revisionId: "revision-1" } } };
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_disposition_repair", issue: { id: "issue-1", status: "in_progress" },
+      recovery: { cause: "deliberate_wait_without_target" },
+      dispositionRepair: { attempt: 1, maxAttempts: 2, instruction: "Respect pending approvals." },
+      ...(kind === "document" ? { documentReviewContext: { issueId: "issue-1", documents: [review] } }
+        : { interactionId: "confirmation-1", interactionKind: "request_confirmation", interactionStatus: "pending" }),
+    });
+    expect(prompt).toContain("Do not produce the deliverable yourself.");
+    if (kind === "document") expect(prompt).toContain("revision-1");
+  });
+
   it.each([false, true])("keeps owner disposition repair productive (resumed=%s)", resumedSession => {
     const payload = {
       reason: "issue_disposition_repair",
