@@ -1,77 +1,15 @@
-name: Conditional interaction wake qualification
-run-name: Conditional dependency-overlay qualification b194894d5 vs bba6a45f0
+name: Baseline interaction wake negative control
+run-name: Baseline native recipient gate with retained regression test
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: interaction-wake-lock-overlay-20261029
+  group: interaction-wake-baseline-gate-20261029
   cancel-in-progress: false
 jobs:
-  dependency_overlay:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    outputs:
-      lock_sha: ${{ steps.verify.outputs.lock_sha }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: VictorGTheCoder/paperclip
-          ref: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
-          persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
-        with:
-          version: 9.15.4
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24.21.0
-          package-manager-cache: false
-      - name: Resolve one common dependency overlay without lifecycle scripts
-        run: |
-          set -euo pipefail
-          mkdir -p dependency-evidence
-          cp pnpm-lock.yaml dependency-evidence/original-lock.yaml
-          pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts 2>&1 | tee dependency-evidence/resolution.log
-          cp pnpm-lock.yaml dependency-evidence/repaired-lock.yaml
-          git diff -- pnpm-lock.yaml > dependency-evidence/lock-repair.patch
-      - name: Verify only the missing importer entries and new graph closure changed
-        id: verify
-        run: |
-          set -euo pipefail
-          python3 -m pip install --target /tmp/qualification-yaml PyYAML==6.0.3
-          PYTHONPATH=/tmp/qualification-yaml python3 - <<'PY'
-          import hashlib,json,os,pathlib,subprocess,yaml
-          root=pathlib.Path('dependency-evidence')
-          old=yaml.safe_load((root/'original-lock.yaml').read_text()); new=yaml.safe_load((root/'repaired-lock.yaml').read_text())
-          missing={'@modelcontextprotocol/sdk','light-my-request'}
-          def unchanged_existing(a,b,label):
-              for k,v in a.items():
-                  assert k in b and b[k]==v, f'{label}: existing entry changed: {k}'
-          for section in set(old)|set(new):
-              if section not in {'importers','packages','snapshots'}: assert old.get(section)==new.get(section),section
-          for importer,value in old['importers'].items():
-              if importer!='server': assert new['importers'][importer]==value,importer
-          assert set(old['importers'])==set(new['importers'])
-          a=old['importers']['server']; b=new['importers']['server']
-          for section in set(a)|set(b):
-              if section!='dependencies': assert a.get(section)==b.get(section),section
-          unchanged_existing(a['dependencies'],b['dependencies'],'server dependencies')
-          assert set(b['dependencies'])-set(a['dependencies'])==missing
-          for section in ['packages','snapshots']: unchanged_existing(old[section],new[section],section)
-          changed=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines(); assert changed==['pnpm-lock.yaml'],changed
-          digest=hashlib.sha256((root/'repaired-lock.yaml').read_bytes()).hexdigest()
-          record={'classification':'conditional common dependency overlay; original frozen commits remain unqualified', 'baseline':'bba6a45f0d364cfd962ac59b3bdf2426a8222adb','lockSha256':digest,'missingImporterEntries':{k:b['dependencies'][k] for k in sorted(missing)},'existingLockedEntriesUnchanged':True,'addedPackages':sorted(set(new['packages'])-set(old['packages'])),'addedSnapshots':sorted(set(new['snapshots'])-set(old['snapshots']))}
-          (root/'manifest.json').write_text(json.dumps(record,indent=2))
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('lock_sha='+digest+'\n')
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: common-dependency-overlay
-          path: dependency-evidence/
-          retention-days: 30
   qualification:
-    needs: dependency_overlay
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -81,8 +19,6 @@ jobs:
         include:
           - label: baseline
             sha: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
-          - label: candidate
-            sha: b194894d5560b569f2985d72d8c094413ab0afd4
     env:
       CI: 'true'
       CARGO_BUILD_JOBS: '2'
@@ -143,9 +79,11 @@ jobs:
         with:
           name: common-dependency-overlay
           path: dependency-overlay/
+          run-id: 40969019053
+          github-token: ${{ github.token }}
       - name: Apply the verified identical dependency overlay
         env:
-          EXPECTED_LOCK_SHA: ${{ needs.dependency_overlay.outputs.lock_sha }}
+          EXPECTED_LOCK_SHA: d3a65b264dc83849947bf7ffd396bc4fba683f19919592f76925dc5ffd2cb52b
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -167,28 +105,18 @@ jobs:
           status=${PIPESTATUS[0]}
           printf '%s\n' "$status" > qualification-evidence/install.exit
           exit "$status"
-      - name: Full workspace build
-        id: build
+      - name: Build test SDK dependency (not a full workspace qualification)
+        id: test_dependencies
         if: ${{ !cancelled() && steps.identity.outcome == 'success' && steps.install.outcome == 'success' }}
         continue-on-error: true
         run: |
           set +e
-          pnpm run preflight:workspace-links 2>&1 | tee qualification-evidence/build-preflight.log
+          pnpm run preflight:workspace-links 2>&1 | tee qualification-evidence/test-preflight.log
           preflight=${PIPESTATUS[0]}
-          if [ "$preflight" -ne 0 ]; then printf '%s\n' "$preflight" > qualification-evidence/build.exit; exit "$preflight"; fi
-          timeout --kill-after=10s 5400s pnpm -r --workspace-concurrency=1 build 2>&1 | tee qualification-evidence/build.log
+          if [ "$preflight" -ne 0 ]; then exit "$preflight"; fi
+          pnpm --filter @paperclipai/plugin-sdk build 2>&1 | tee qualification-evidence/test-dependencies.log
           status=${PIPESTATUS[0]}
-          printf '%s\n' "$status" > qualification-evidence/build.exit
-          exit "$status"
-      - name: Full workspace typecheck independently of build result
-        id: typecheck
-        if: ${{ !cancelled() && steps.identity.outcome == 'success' && steps.install.outcome == 'success' }}
-        continue-on-error: true
-        run: |
-          set +e
-          timeout --kill-after=10s 5400s pnpm -r --workspace-concurrency=1 typecheck 2>&1 | tee qualification-evidence/typecheck.log
-          status=${PIPESTATUS[0]}
-          printf '%s\n' "$status" > qualification-evidence/typecheck.exit
+          printf '%s\n' "$status" > qualification-evidence/test-dependencies.exit
           exit "$status"
       - name: Native recipient negative control and acceptance
         id: acceptance
@@ -198,10 +126,15 @@ jobs:
           QUALIFICATION_LABEL: ${{ matrix.label }}
         run: |
           set +e
+          regression=server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
+          git show b194894d5560b569f2985d72d8c094413ab0afd4:"$regression" > "$regression"
+          git diff -- "$regression" > qualification-evidence/regression-only-overlay.patch
+          sha256sum "$regression" > qualification-evidence/regression-test.sha256
           if [ "$QUALIFICATION_LABEL" = baseline ]; then filter='11932 native enqueue starts the actual addressed question run'; else filter='11932'; fi
           (cd server && ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t "$filter" --testTimeout=45000 --reporter=json --outputFile=../qualification-evidence/acceptance.json) > qualification-evidence/acceptance.log 2>&1
           status=$?
           printf '%s\n' "$status" > qualification-evidence/acceptance-command.exit
+          git restore --source=HEAD -- "$regression"
           python3 - <<'PY'
           import json,os,pathlib
           d=json.loads(pathlib.Path('qualification-evidence/acceptance.json').read_text())
@@ -223,7 +156,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: interaction-wake-${{ matrix.label }}-${{ matrix.sha }}
+          name: baseline-recipient-gate-${{ matrix.sha }}
           path: qualification-evidence/
           retention-days: 90
       - name: Qualification result
@@ -231,18 +164,17 @@ jobs:
         env:
           IDENTITY_OUTCOME: ${{ steps.identity.outcome }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
-          BUILD_OUTCOME: ${{ steps.build.outcome }}
-          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          TEST_DEPENDENCIES_OUTCOME: ${{ steps.test_dependencies.outcome }}
           ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
         run: |
           python3 - <<'PY'
           import json,os,pathlib
-          result={x:os.environ.get(x) for x in ['IDENTITY_OUTCOME','INSTALL_OUTCOME','BUILD_OUTCOME','TYPECHECK_OUTCOME','ACCEPTANCE_OUTCOME']}
+          result={x:os.environ.get(x) for x in ['IDENTITY_OUTCOME','INSTALL_OUTCOME','TEST_DEPENDENCIES_OUTCOME','ACCEPTANCE_OUTCOME']}
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(json.dumps(result,indent=2)+'\n')
           assert all(x=='success' for x in result.values()), result
           import hashlib,subprocess
           manifest=json.loads(pathlib.Path('qualification-evidence/dependency-overlay.json').read_text())
           assert hashlib.sha256(pathlib.Path('pnpm-lock.yaml').read_bytes()).hexdigest()==manifest['lockSha256']
           assert subprocess.check_output(['git','diff','--name-only','HEAD'],text=True).splitlines()==['pnpm-lock.yaml']
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('Conditional dependency-overlay result only; strict unmodified-source install failed in run 40968061121.\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('Baseline regression gate only. Full baseline build/typecheck evidence is in run 40969019053; this job does not rerun or replace those checks.\n')
           PY
