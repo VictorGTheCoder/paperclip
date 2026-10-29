@@ -779,6 +779,14 @@ export function questionResponseDeliveryService(
       });
     }
 
+    // Persisting an answer does not authorize a continuation when the card
+    // explicitly disables it. Consume the outbox receipt without a runtime wake.
+    if (interaction.continuationPolicy !== "wake_assignee" &&
+        interaction.continuationPolicy !== "wake_assignee_on_accept") {
+      return recordTerminal({ delivery: claimed, interaction, status: "delivered",
+        mode: null, targetRunId: null, adapter: "none" });
+    }
+
     const [issue, agent, sourceRun, externalInteractionPublication] =
       await Promise.all([
         db

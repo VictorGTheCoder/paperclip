@@ -1,3 +1,4 @@
+import { verifyPendingAddresseeWake } from "./pending-addressee-wake.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -13820,6 +13821,18 @@ export function heartbeatService(
       readNonEmptyString(contextSnapshot.issueId) ??
       readNonEmptyString(contextSnapshot.taskId);
     if (!issueId) return;
+    // An addressed question with no continuation deliberately consumes its
+    // review path. Completion must not convert that choice into a recovery wake.
+    const interactionId = readNonEmptyString(contextSnapshot.interactionId);
+    if (contextSnapshot.wakeReason === "interaction_pending" && interactionId && isUuidLike(interactionId)) {
+      const [answered] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.id, interactionId), eq(issueThreadInteractions.companyId, run.companyId),
+        eq(issueThreadInteractions.issueId, issueId), eq(issueThreadInteractions.kind, "ask_user_questions"),
+        eq(issueThreadInteractions.status, "answered"), eq(issueThreadInteractions.continuationPolicy, "none"),
+        eq(issueThreadInteractions.addresseeAgentId, run.agentId),
+      ));
+      if (answered) return;
+    }
     const waitingContext = await getIssueExecutionContext(run.companyId, issueId);
     if (isWaitingConversation(waitingContext) || waitingContext?.externalConversationState === "waiting") return;
 
@@ -17576,6 +17589,16 @@ export function heartbeatService(
       }).from(issues).where(and(
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
       )).for("update") : [];
+      if (context.wakeReason === "interaction_pending" && issueId) {
+        // Both ordinary and adopted-comment claims pass through this lock.
+        // Defer a stale/contended recipient to the next staleness sweep; do not
+        // write running or consume its comment receipt on this claim attempt.
+        // NOWAIT contention rolls back through the outer claim handler.
+        if (!(await verifyPendingAddresseeWake(tx, {
+          companyId: run.companyId, issueId, agentId: run.agentId, runId: run.id,
+          contextSnapshot: context, lock: true,
+        }))) return { ownsIssue: false, blocked: true };
+      }
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
         context.wakeReason !== "source_scoped_recovery_action";
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
@@ -17916,7 +17939,10 @@ export function heartbeatService(
                 : { kind: "stale" as const, run: null };
             })
             .catch((error) => {
-              if (isExternalChatWaitAuthorizationContention(error))
+              if ((context.wakeReason === "interaction_pending" &&
+                  ((error as { code?: string }).code === "55P03" ||
+                   (error as { cause?: { code?: string } }).cause?.code === "55P03")) ||
+                  isExternalChatWaitAuthorizationContention(error))
                 return { kind: "stale" as const, run: null };
               throw error;
             })
@@ -17985,6 +18011,11 @@ export function heartbeatService(
             await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
             return claimedRun;
           });
+        }).catch((error) => {
+          if (context.wakeReason === "interaction_pending" &&
+              ((error as { code?: string }).code === "55P03" ||
+               (error as { cause?: { code?: string } }).cause?.code === "55P03")) return null;
+          throw error;
         });
     if (!claimed) return null;
 
@@ -19697,6 +19728,26 @@ export function heartbeatService(
     for (const { wake } of strandedQueues) {
       if (!queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
+      const staleRecipientRunId = readNonEmptyString(parseObject(parseObject(wake.payload)._paperclipWakeContext).requeuedFromRunId);
+      if (staleRecipientRunId && wake.idempotencyKey === `stale-addressee-requeue:${staleRecipientRunId}`) {
+        const [source] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, staleRecipientRunId), eq(heartbeatRuns.companyId, wake.companyId),
+          eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.errorCode, "issue_assignee_changed"),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${String(wake.payload?.issueId)}`,
+        ));
+        const ids = queuedCommentIdsFromWakePayload(wake.payload);
+        if (source && ids.length) {
+          await enqueueWakeup(wake.agentId, { source: "on_demand", triggerDetail: "manual", reason: "issue_commented",
+            payload: parseObject(wake.payload), queuedCommentRequestId: wake.id,
+            contextSnapshot: withQueuedCommentIdsInRunContext({ issueId: String(wake.payload?.issueId),
+              wakeReason: "issue_commented", source: "stale_recipient_comments" }, ids),
+            requestedByActorType: "user", requestedByActorId: wake.requestedByActorId,
+            issueStateGuard: { assigneeAgentId: wake.agentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
+            idempotencyKey: `stale-addressee-delivery:${wake.id}`,
+          }, wake.id);
+        }
+        continue;
+      }
       const [latest] = await db.select().from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, wake.companyId), eq(heartbeatRuns.agentId, wake.agentId),
         sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${String(wake.payload?.issueId)}`,
@@ -28545,6 +28596,12 @@ export function heartbeatService(
             );
 
             if (admission.kind === "coalesced") {
+              if (executionWaitRequestId) await tx.update(agentWakeupRequests).set({
+                status: "coalesced", runId: String(admission.run.id), finishedAt: new Date(), updatedAt: new Date(),
+              }).where(and(eq(agentWakeupRequests.id, executionWaitRequestId),
+                eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agentId),
+                eq(agentWakeupRequests.status, "deferred_issue_execution")));
+
               return {
                 kind: "coalesced" as const,
                 run: admission.run as typeof heartbeatRuns.$inferSelect,

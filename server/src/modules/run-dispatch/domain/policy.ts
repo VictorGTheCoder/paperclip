@@ -146,6 +146,7 @@ export type QueuedRunFacts = {
   /** A connection resolution or tool refresh can resume an agent waiting in review. */
   isConnectionContinuation?: boolean;
   isInteractionWake: boolean;
+  invalidPendingAddresseeWake?: boolean;
   isAuthorizedSourceScopedRecovery: boolean;
   isNonAssigneeWorkspaceBusyRetry: boolean;
 
@@ -507,6 +508,13 @@ export function decideQueuedRunStaleness(
     };
   }
 
+  // Invalid addressed wakes cannot borrow unrelated comment/owner/review authority.
+  if (facts.invalidPendingAddresseeWake) return {
+    stale: true, errorCode: "issue_assignee_changed",
+    reason: "Cancelled because the pending interaction no longer authorizes this recipient",
+    details: { issueId: facts.issueId },
+  };
+
   if (facts.isResolvedInteractionContinuation || facts.isConnectionContinuation) {
     const earlyStatus = decideIssueStatus({
       status: facts.issueStatus,
@@ -661,7 +669,7 @@ export function decideQueuedRunStaleness(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
-    bypass: facts.wakeCommentIdPresent,
+    bypass: facts.wakeCommentIdPresent || facts.isInteractionWake,
   });
   if (participantOutcome === "participant_changed") {
     return {

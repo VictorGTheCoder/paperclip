@@ -1,3 +1,5 @@
+import { queuedCommentIdsFromRunContext } from "../../../services/issue-queued-comment-queue.js";
+import { preserveStaleRecipientComments, verifyPendingAddresseeWake } from "../../../services/pending-addressee-wake.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -528,7 +530,10 @@ export function createPostgresRunDispatchAdapter(
     );
 
     const wakeCommentId = deriveCommentId(context);
-    const isInteractionWake = allowsIssueInteractionWake(
+    const isPendingAddresseeWake = issue ? await verifyPendingAddresseeWake(dbOrTx, {
+      companyId: input.companyId, issueId, agentId: input.agentId, runId: input.runId, contextSnapshot: context,
+    }) : false;
+    const isInteractionWake = isPendingAddresseeWake || allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
     );
@@ -605,6 +610,7 @@ export function createPostgresRunDispatchAdapter(
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
+      invalidPendingAddresseeWake: context.wakeReason === "interaction_pending" && !isPendingAddresseeWake,
       isAuthorizedSourceScopedRecovery,
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,
@@ -899,6 +905,12 @@ export function createPostgresRunDispatchAdapter(
       // `expectedStatus`: the caller's staleness decision lost the race, so
       // this write must not overwrite whatever status won it.
       if (!row) return { outcome: "lost_race" };
+
+      const context = parseObject(row.contextSnapshot);
+      if (decision.errorCode === "issue_assignee_changed" && context.wakeReason === "interaction_pending") {
+        await preserveStaleRecipientComments(tx, { companyId: row.companyId, issueId, runId: row.id,
+          commentIds: queuedCommentIdsFromRunContext(context) });
+      }
 
       if (row.wakeupRequestId) {
         await tx
