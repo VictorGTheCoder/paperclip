@@ -1,108 +1,25 @@
-name: Conditional interaction wake qualification
-run-name: Conditional dependency-overlay qualification b194894d5 vs bba6a45f0
+name: Controlled maintenance release build
+run-name: Combined maintenance release 4b978f341
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: interaction-wake-lock-overlay-20261029
+  group: maintenance-release-20261030
   cancel-in-progress: false
 jobs:
-  dependency_overlay:
+  release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    outputs:
-      lock_sha: ${{ steps.verify.outputs.lock_sha }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: VictorGTheCoder/paperclip
-          ref: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
-          persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
-        with:
-          version: 9.15.4
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24.21.0
-          package-manager-cache: false
-      - name: Apply the pinned common dependency overlay without lifecycle scripts
-        run: |
-          set -euo pipefail
-          mkdir -p dependency-evidence
-          cp pnpm-lock.yaml dependency-evidence/original-lock.yaml
-          git fetch --no-tags --depth=1 origin "$GITHUB_WORKFLOW_SHA"
-          git show "$GITHUB_WORKFLOW_SHA":.github/qualification/bba-lock-repair.patch > dependency-evidence/pinned-lock-repair.patch
-          python3 - <<'PY'
-          import hashlib,pathlib
-          assert hashlib.sha256(pathlib.Path('dependency-evidence/pinned-lock-repair.patch').read_bytes()).hexdigest()=='149b76b1575292ec199cc42014bbdef4e4f9b3cf307e9e0a4e8dbf430207b2f6'
-          PY
-          git apply --check dependency-evidence/pinned-lock-repair.patch
-          git apply dependency-evidence/pinned-lock-repair.patch
-          cp pnpm-lock.yaml dependency-evidence/repaired-lock.yaml
-          git diff -- pnpm-lock.yaml > dependency-evidence/lock-repair.patch
-      - name: Verify only the missing importer entries and new graph closure changed
-        id: verify
-        run: |
-          set -euo pipefail
-          python3 -m pip install --target /tmp/qualification-yaml PyYAML==6.0.3
-          PYTHONPATH=/tmp/qualification-yaml python3 - <<'PY'
-          import hashlib,json,os,pathlib,subprocess,yaml
-          root=pathlib.Path('dependency-evidence')
-          old=yaml.safe_load((root/'original-lock.yaml').read_text()); new=yaml.safe_load((root/'repaired-lock.yaml').read_text())
-          missing={'@modelcontextprotocol/sdk','light-my-request'}
-          def unchanged_existing(a,b,label):
-              for k,v in a.items():
-                  assert k in b and b[k]==v, f'{label}: existing entry changed: {k}'
-          for section in set(old)|set(new):
-              if section not in {'importers','packages','snapshots'}: assert old.get(section)==new.get(section),section
-          for importer,value in old['importers'].items():
-              if importer!='server': assert new['importers'][importer]==value,importer
-          assert set(old['importers'])==set(new['importers'])
-          a=old['importers']['server']; b=new['importers']['server']
-          for section in set(a)|set(b):
-              if section!='dependencies': assert a.get(section)==b.get(section),section
-          unchanged_existing(a['dependencies'],b['dependencies'],'server dependencies')
-          assert set(b['dependencies'])-set(a['dependencies'])==missing
-          for section in ['packages','snapshots']: unchanged_existing(old[section],new[section],section)
-          changed=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines(); assert changed==['pnpm-lock.yaml'],changed
-          digest=hashlib.sha256((root/'repaired-lock.yaml').read_bytes()).hexdigest()
-          record={'classification':'conditional common dependency overlay; original frozen commits remain unqualified', 'baseline':'bba6a45f0d364cfd962ac59b3bdf2426a8222adb','lockSha256':digest,'missingImporterEntries':{k:b['dependencies'][k] for k in sorted(missing)},'existingLockedEntriesUnchanged':True,'addedPackages':sorted(set(new['packages'])-set(old['packages'])),'addedSnapshots':sorted(set(new['snapshots'])-set(old['snapshots']))}
-          (root/'manifest.json').write_text(json.dumps(record,indent=2))
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('lock_sha='+digest+'\n')
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: common-dependency-overlay
-          path: dependency-evidence/
-          retention-days: 30
-  qualification:
-    needs: dependency_overlay
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - label: baseline
-            sha: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
-          - label: candidate
-            sha: b194894d5560b569f2985d72d8c094413ab0afd4
+    timeout-minutes: 120
     env:
-      CI: 'true'
-      CARGO_BUILD_JOBS: '2'
-      PAPERCLIP_TELEMETRY_DISABLED: '1'
-      DO_NOT_TRACK: '1'
-      GOMEMLIMIT: '6GiB'
-      NODE_OPTIONS: '--max-old-space-size=8192'
+      RELEASE_SHA: 4b978f341
+      NODE_OPTIONS: --max-old-space-size=8192
+      CARGO_BUILD_JOBS: 2
+      GOMEMLIMIT: 6GiB
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: VictorGTheCoder/paperclip
-          ref: ${{ matrix.sha }}
-          fetch-depth: 1
+          ref: release/controlled-maintenance-20261030
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
         with:
@@ -111,152 +28,66 @@ jobs:
         with:
           node-version: 24.21.0
           package-manager-cache: false
-      - name: Verify source identity and clean hosted environment
-        id: identity
-        env:
-          EXPECTED_SHA: ${{ matrix.sha }}
-          QUALIFICATION_LABEL: ${{ matrix.label }}
+      - name: Exact source and build resources
         run: |
           set -euo pipefail
-          mkdir -p qualification-evidence
-          git fetch --no-tags --depth=1 origin bba6a45f0d364cfd962ac59b3bdf2426a8222adb b194894d5560b569f2985d72d8c094413ab0afd4
-          python3 - <<'PY'
-          import hashlib,json,os,pathlib,shutil,socket,subprocess
-          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
-          expected=os.environ['EXPECTED_SHA']; actual=git('rev-parse','HEAD')
-          production_paths=['/home/paperclip','/home/bobby/.codex','/home/bobby/.paperclip','/home/bobby/.config/gh','/home/bobby/worktrees']
-          sensitive=['PAPERCLIP_API_KEY','PAPERCLIP_CONFIG','DATABASE_URL','OPENAI_API_KEY','ANTHROPIC_API_KEY','CODEX_HOME']
-          mem=dict(line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
-          ram=int(mem['MemTotal'].strip().split()[0])*1024
-          sock=socket.socket(); sock.settimeout(2); port_open=sock.connect_ex(('127.0.0.1',3100))==0; sock.close()
-          patch=subprocess.check_output(['git','diff','--no-ext-diff','--full-index','--binary','bba6a45f0d364cfd962ac59b3bdf2426a8222adb','b194894d5560b569f2985d72d8c094413ab0afd4','--'])
-          names=git('diff','--name-only','bba6a45f0d364cfd962ac59b3bdf2426a8222adb','b194894d5560b569f2985d72d8c094413ab0afd4').splitlines()
-          record={'expectedSha':expected,'actualSha':actual,'tree':git('rev-parse','HEAD^{tree}'),'label':os.environ['QUALIFICATION_LABEL'],'ramBytes':ram,'diskFreeBytes':shutil.disk_usage('.').free,'hostname':socket.gethostname(),'productionPathExists':{x:pathlib.Path(x).exists() for x in production_paths},'sensitiveEnvironmentPresence':{x:x in os.environ for x in sensitive},'localProductionPort3100Open':port_open,'canonicalDiffSha256':hashlib.sha256(patch).hexdigest(),'candidateChangedPaths':names,'workflowRef':os.environ.get('GITHUB_WORKFLOW_REF'),'workflowSha':os.environ.get('GITHUB_WORKFLOW_SHA'),'realACPExecuted':False,'providerCredentialInjected':False,'isolationScope':'Fresh hosted VM and absent production filesystem/credentials; no claim of a qualified real ACP sandbox or unrestricted-network isolation.'}
-          pathlib.Path('qualification-evidence/identity.json').write_text(json.dumps(record,indent=2))
-          pathlib.Path('qualification-evidence/canonical.patch').write_bytes(patch)
-          assert actual==expected
-          assert record['canonicalDiffSha256']=='0478b12f70e775a28fec21aa2ad5f5df421ec8f6ae603fa3cfb07e5e57722757'
-          assert sorted(names)==sorted(['docs/api/issues.md', 'server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts', 'server/src/modules/run-dispatch/adapters/postgres.ts', 'server/src/modules/run-dispatch/domain/policy.ts', 'server/src/services/heartbeat.ts', 'server/src/services/pending-addressee-wake.ts', 'server/src/services/question-response-delivery.ts'])
-          assert ram>=12*1024**3, 'Hosted runner has insufficient RAM'
-          assert record['diskFreeBytes']>=10*1024**3, 'Hosted runner has insufficient free disk'
-          assert not any(record['productionPathExists'].values())
-          assert not any(record['sensitiveEnvironmentPresence'].values())
-          assert not port_open
-          PY
-          node --version > qualification-evidence/node-version.txt
-          pnpm --version > qualification-evidence/pnpm-version.txt
-          git status --porcelain > qualification-evidence/source-initial-status.txt
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: common-dependency-overlay
-          path: dependency-overlay/
-      - name: Apply the verified identical dependency overlay
-        env:
-          EXPECTED_LOCK_SHA: ${{ needs.dependency_overlay.outputs.lock_sha }}
+          mkdir evidence
+          test "$(git rev-parse --short=9 HEAD)" = "$RELEASE_SHA"
+          echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git rev-parse HEAD > evidence/source-sha.txt
+          git rev-parse HEAD^{tree} > evidence/source-tree.txt
+          git status --porcelain > evidence/initial-status.txt
+          test ! -s evidence/initial-status.txt
+          git fetch --depth=1 origin "$GITHUB_WORKFLOW_SHA"
+          git show "$GITHUB_WORKFLOW_SHA":.github/qualification/package-maintenance.ts > .github/package-maintenance.ts
+          sed -i 's|../../cli/src/commands/install.ts|../cli/src/commands/install.ts|' .github/package-maintenance.ts
+          free -b > evidence/memory.txt
+          df -B1 . > evidence/disk.txt
+          node --version > evidence/node.txt
+          pnpm --version > evidence/pnpm.txt
+          sha256sum pnpm-lock.yaml > evidence/lock.sha256
+      - name: Frozen install
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee evidence/install.log
+      - name: Complete build
+        run: |
+          set -o pipefail
+          pnpm run preflight:workspace-links
+          pnpm -r --workspace-concurrency=1 build 2>&1 | tee evidence/build.log
+          echo 0 > evidence/build.exit
+      - name: Complete typecheck
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          pnpm -r --workspace-concurrency=1 typecheck 2>&1 | tee evidence/typecheck.log
+          echo 0 > evidence/typecheck.exit
+      - name: Combined recovery and routing acceptance
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import hashlib,json,os,pathlib,shutil
-          lock=pathlib.Path('dependency-overlay/repaired-lock.yaml')
-          manifest=json.loads(pathlib.Path('dependency-overlay/manifest.json').read_text())
-          digest=hashlib.sha256(lock.read_bytes()).hexdigest()
-          assert digest==manifest['lockSha256']==os.environ['EXPECTED_LOCK_SHA']
-          assert hashlib.sha256(pathlib.Path('pnpm-lock.yaml').read_bytes()).digest()==hashlib.sha256(pathlib.Path('dependency-overlay/original-lock.yaml').read_bytes()).digest()
-          shutil.copyfile(lock,'pnpm-lock.yaml')
-          shutil.copyfile('dependency-overlay/manifest.json','qualification-evidence/dependency-overlay.json')
-          PY
-      - name: Install exact locked dependencies
-        id: install
-        continue-on-error: true
+          pnpm exec vitest run packages/adapter-utils/src/server-utils.test.ts --reporter=json --outputFile=evidence/recovery-tests.json > evidence/recovery-tests.log 2>&1
+          cd server
+          ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t 11932 --testTimeout=60000 --reporter=json --outputFile=../evidence/routing-tests.json > ../evidence/routing-tests.log 2>&1
+      - name: Build installable payload with native packaging
         run: |
-          set +e
-          pnpm install --frozen-lockfile 2>&1 | tee qualification-evidence/install.log
-          status=${PIPESTATUS[0]}
-          printf '%s\n' "$status" > qualification-evidence/install.exit
-          exit "$status"
-      - name: Full workspace build
-        id: build
-        if: ${{ !cancelled() && steps.identity.outcome == 'success' && steps.install.outcome == 'success' }}
-        continue-on-error: true
-        run: |
-          set +e
-          pnpm run preflight:workspace-links 2>&1 | tee qualification-evidence/build-preflight.log
-          preflight=${PIPESTATUS[0]}
-          if [ "$preflight" -ne 0 ]; then printf '%s\n' "$preflight" > qualification-evidence/build.exit; exit "$preflight"; fi
-          timeout --kill-after=10s 5400s pnpm -r --workspace-concurrency=1 build 2>&1 | tee qualification-evidence/build.log
-          status=${PIPESTATUS[0]}
-          printf '%s\n' "$status" > qualification-evidence/build.exit
-          exit "$status"
-      - name: Full workspace typecheck independently of build result
-        id: typecheck
-        if: ${{ !cancelled() && steps.identity.outcome == 'success' && steps.install.outcome == 'success' }}
-        continue-on-error: true
-        run: |
-          set +e
-          timeout --kill-after=10s 5400s pnpm -r --workspace-concurrency=1 typecheck 2>&1 | tee qualification-evidence/typecheck.log
-          status=${PIPESTATUS[0]}
-          printf '%s\n' "$status" > qualification-evidence/typecheck.exit
-          exit "$status"
-      - name: Native recipient negative control and acceptance
-        id: acceptance
-        if: ${{ !cancelled() && steps.identity.outcome == 'success' && steps.install.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          QUALIFICATION_LABEL: ${{ matrix.label }}
-        run: |
-          set +e
-          regression=server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
-          if [ "$QUALIFICATION_LABEL" = baseline ]; then
-            git show b194894d5560b569f2985d72d8c094413ab0afd4:"$regression" > "$regression"
-            git diff -- "$regression" > qualification-evidence/regression-only-overlay.patch
-          fi
-          sha256sum "$regression" > qualification-evidence/regression-test.sha256
-          if [ "$QUALIFICATION_LABEL" = baseline ]; then filter='11932 native enqueue starts the actual addressed question run'; else filter='11932'; fi
-          (cd server && ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t "$filter" --testTimeout=45000 --reporter=json --outputFile=../qualification-evidence/acceptance.json) > qualification-evidence/acceptance.log 2>&1
-          status=$?
-          printf '%s\n' "$status" > qualification-evidence/acceptance-command.exit
-          git restore --source=HEAD -- "$regression"
-          python3 - <<'PY'
-          import json,os,pathlib
-          d=json.loads(pathlib.Path('qualification-evidence/acceptance.json').read_text())
-          messages='\n'.join(m for r in d['testResults'] for t in r.get('assertionResults',[]) for m in t.get('failureMessages',[]))
-          if os.environ['QUALIFICATION_LABEL']=='baseline':
-              assert d['numFailedTests']==1 and 'issue_assignee_changed' in messages, d
-          else:
-              assert d['numPassedTests']==27 and d['numFailedTests']==0, d
-          PY
-      - name: Preserve final source status
-        if: always()
-        run: |
-          mkdir -p qualification-evidence
-          git rev-parse HEAD > qualification-evidence/source-final-sha.txt
-          git status --porcelain > qualification-evidence/source-final-status.txt
-          git diff -- pnpm-lock.yaml > qualification-evidence/lockfile-diff.patch
-          free -b > qualification-evidence/memory-final.txt
-          df -B1 . > qualification-evidence/disk-final.txt
+          set -o pipefail
+          pnpm exec tsx .github/package-maintenance.ts 2>&1 | tee evidence/packaging.log
+          test -z "$(git diff --name-only)"
+          git status --porcelain > evidence/final-status.txt
+          cd release-output
+          sha256sum paperclip-maintenance-linux-x64.tar.gz installed-package-lock.json package-provenance.json > SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: interaction-wake-${{ matrix.label }}-${{ matrix.sha }}
-          path: qualification-evidence/
-          retention-days: 90
-      - name: Qualification result
-        if: always()
-        env:
-          IDENTITY_OUTCOME: ${{ steps.identity.outcome }}
-          INSTALL_OUTCOME: ${{ steps.install.outcome }}
-          BUILD_OUTCOME: ${{ steps.build.outcome }}
-          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
-          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
-        run: |
-          python3 - <<'PY'
-          import json,os,pathlib
-          result={x:os.environ.get(x) for x in ['IDENTITY_OUTCOME','INSTALL_OUTCOME','BUILD_OUTCOME','TYPECHECK_OUTCOME','ACCEPTANCE_OUTCOME']}
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(json.dumps(result,indent=2)+'\n')
-          assert all(x=='success' for x in result.values()), result
-          import hashlib,subprocess
-          manifest=json.loads(pathlib.Path('qualification-evidence/dependency-overlay.json').read_text())
-          assert hashlib.sha256(pathlib.Path('pnpm-lock.yaml').read_bytes()).hexdigest()==manifest['lockSha256']
-          assert subprocess.check_output(['git','diff','--name-only','HEAD'],text=True).splitlines()==['pnpm-lock.yaml']
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('Conditional dependency-overlay result only; strict unmodified-source install failed in run 40968061121.\n')
-          PY
+          name: maintenance-build-evidence
+          path: evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: paperclip-maintenance-linux-x64
+          path: |
+            release-output/paperclip-maintenance-linux-x64.tar.gz
+            release-output/installed-package-lock.json
+            release-output/package-provenance.json
+            release-output/SHA256SUMS
+          retention-days: 30
