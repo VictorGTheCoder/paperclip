@@ -72,7 +72,7 @@ jobs:
       - name: Build installable payload with native packaging
         run: |
           set -o pipefail
-          pnpm exec tsx .github/package-maintenance.ts 2>&1 | tee evidence/packaging.log
+          node cli/node_modules/tsx/dist/cli.mjs .github/package-maintenance.ts 2>&1 | tee evidence/packaging.log
           test -z "$(git diff --name-only)"
           git status --porcelain > evidence/final-status.txt
           cd release-output

@@ -6,6 +6,8 @@ const root=process.cwd(), out=path.resolve('release-output'), packs=path.join(ou
 fs.mkdirSync(packs,{recursive:true});
 const run=(cmd:string,args:string[],cwd=root,extra={})=>execFileSync(cmd,args,{cwd,stdio:'inherit',env:{...process.env,...extra},maxBuffer:64*1024*1024});
 const entries=resolveGitInstallWorkspacePackages(root);
+run('bash',['scripts/prepare-server-ui-dist.sh'],root,{PAPERCLIP_RELEASE_REUSE_UI_DIST:'1'});
+for(const dir of ['server','packages/adapters/claude-local','packages/adapters/codex-local']) fs.cpSync(path.resolve('skills'),path.join(root,dir,'skills'),{recursive:true});
 run('bash',['scripts/build-npm.sh','--skip-checks','--skip-typecheck']);
 for(const [i,e] of entries.entries()){
  const dir=path.resolve(e.dir),pkg=JSON.parse(fs.readFileSync(path.join(dir,'package.json'),'utf8'));
