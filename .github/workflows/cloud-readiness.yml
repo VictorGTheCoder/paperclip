@@ -1,10 +1,9 @@
-name: Controlled maintenance release packaging
-run-name: Package verified compiled maintenance release 4b978f341
+name: Controlled maintenance release build
+run-name: Issue-contained maintenance release d170147b9
 on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: maintenance-release-20261030
   cancel-in-progress: false
@@ -13,14 +12,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      RELEASE_SHA: 4b978f341
+      RELEASE_SHA: d170147b9
       NODE_OPTIONS: --max-old-space-size=8192
       CARGO_BUILD_JOBS: 2
       GOMEMLIMIT: 6GiB
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: release/controlled-maintenance-20261030
+          ref: release/issue-maintenance-containment-20261030
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
         with:
@@ -29,43 +28,59 @@ jobs:
         with:
           node-version: 24.21.0
           package-manager-cache: false
-      - name: Verify exact release and load packaging harness
+      - name: Exact source and build resources
         run: |
           set -euo pipefail
           mkdir evidence
-          test "$(git rev-parse HEAD)" = "4b978f3414a2cb8afa5c8d4fba5b3e1bae98ff90"
+          test "$(git rev-parse --short=9 HEAD)" = "$RELEASE_SHA"
           echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git rev-parse HEAD > evidence/source-sha.txt
+          git rev-parse HEAD^{tree} > evidence/source-tree.txt
+          git status --porcelain --untracked-files=no > evidence/initial-status.txt
+          test ! -s evidence/initial-status.txt
           git fetch --depth=1 origin "$GITHUB_WORKFLOW_SHA"
           git show "$GITHUB_WORKFLOW_SHA":.github/qualification/package-maintenance.ts > .github/package-maintenance.ts
           sed -i 's|../../cli/src/commands/install.ts|../cli/src/commands/install.ts|' .github/package-maintenance.ts
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: maintenance-build-evidence
-          path: compiled-evidence
-          run-id: 40978599963
-          github-token: ${{ github.token }}
-      - name: Frozen dependency install and retained compiled output verification
+          free -b > evidence/memory.txt
+          df -B1 . > evidence/disk.txt
+          node --version > evidence/node.txt
+          pnpm --version > evidence/pnpm.txt
+          sha256sum pnpm-lock.yaml > evidence/lock.sha256
+      - name: Frozen install
+        id: install
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee evidence/install.log
+      - name: Complete build
+        run: |
+          set -o pipefail
+          pnpm run preflight:workspace-links
+          pnpm -r --workspace-concurrency=1 build 2>&1 | tee evidence/build.log
+          echo 0 > evidence/build.exit
+      - name: Complete typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          pnpm -r --workspace-concurrency=1 typecheck 2>&1 | tee evidence/typecheck.log
+          echo 0 > evidence/typecheck.exit
+      - name: Combined recovery and routing acceptance
         run: |
           set -euo pipefail
-          pnpm install --frozen-lockfile > evidence/install.log 2>&1
-          test "$(cat compiled-evidence/source-sha.txt)" = "$RELEASE_SHA"
-          test "$(cat compiled-evidence/build.exit)" = 0
-          test "$(cat compiled-evidence/typecheck.exit)" = 0
-          sha256sum compiled-evidence/compiled-workspace.tar.gz > evidence/compiled-workspace.sha256
-          tar -xzf compiled-evidence/compiled-workspace.tar.gz
-          git diff --exit-code
-          python3 - <<'PY'
-          import json,pathlib
-          for n,count in [('recovery-tests',133),('routing-tests',27)]:
-              x=json.loads(pathlib.Path('compiled-evidence',n+'.json').read_text());assert x['numPassedTests']==count and x['numFailedTests']==0
-          p={'compiledSourceRun':40978599963,'compiledSourceArtifact':12944377882,'compiledSourceArtifactDigest':'sha256:88c0f2abc630a61f5ccce92d7d1c20d558733425c25bf9297d420674dd42a865','source':'4b978f3414a2cb8afa5c8d4fba5b3e1bae98ff90','fullBuildPassed':True,'fullTypecheckPassed':True,'recoveryPassed':133,'routingPassed':27}
-          pathlib.Path('evidence/compiled-source-provenance.json').write_text(json.dumps(p,indent=2))
-          PY
+          pnpm exec vitest run packages/adapter-utils/src/server-utils.test.ts --reporter=json --outputFile=evidence/recovery-tests.json > evidence/recovery-tests.log 2>&1
+          cd server
+          ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t 11932 --testTimeout=60000 --reporter=json --outputFile=../evidence/routing-tests.json > ../evidence/routing-tests.log 2>&1
+      - name: Containment and gated routing regressions
+        run: |
+          set -euo pipefail
+          cd server
+          ../node_modules/.bin/vitest run src/__tests__/maintenance-admission.test.ts src/__tests__/maintenance-admission-postgres.test.ts src/__tests__/heartbeat-task-drain.test.ts src/__tests__/heartbeat-task-drain-admission-release.test.ts src/__tests__/native-session-resumption.test.ts --testTimeout=60000 --reporter=json --outputFile=../evidence/containment-tests.json > ../evidence/containment-tests.log 2>&1
+          PAPERCLIP_TEST_MAINTENANCE=1 ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t 11932 --testTimeout=60000 --reporter=json --outputFile=../evidence/gated-routing-tests.json > ../evidence/gated-routing-tests.log 2>&1
+      - name: Preserve compiled workspace for packaging recovery
+        run: tar --exclude=node_modules -czf evidence/compiled-workspace.tar.gz packages server ui cli skills scripts pnpm-lock.yaml package.json pnpm-workspace.yaml patches tsconfig.base.json
       - name: Build installable payload with native packaging
         run: |
           set -o pipefail
           node cli/node_modules/tsx/dist/cli.mjs .github/package-maintenance.ts 2>&1 | tee evidence/packaging.log
-          git diff > evidence/post-pack-source.diff
           test -z "$(git diff --name-only)"
           git status --porcelain > evidence/final-status.txt
           cd release-output
@@ -73,11 +88,10 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: maintenance-packaging-evidence
+          name: maintenance-build-evidence
           path: evidence/
           retention-days: 30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
         with:
           name: paperclip-maintenance-linux-x64
           path: |
