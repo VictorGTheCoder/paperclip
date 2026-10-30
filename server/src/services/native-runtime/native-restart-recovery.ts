@@ -1,3 +1,4 @@
+import { maintenanceAllowsRun } from "../maintenance-admission.js";
 import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 import { recordNativeLocalProcessStop } from "../native-local-process-stop.js";
 import { randomUUID } from "node:crypto";
@@ -448,6 +449,7 @@ function appendBoundedRecoveryHistory(entry: Record<string, unknown>) {
  * owner so two successor servers cannot both reconstruct the same authority.
  */
 export async function claimNativeRestartRecoveries(input: {
+  maintenanceEnv?: Record<string, string | undefined>;
   db: Db;
   controller?: NativeControllerIdentity;
   restartKind: NativeRestartKind;
@@ -545,6 +547,9 @@ export async function claimNativeRestartRecoveries(input: {
           runId: candidate.runId,
           reason: "recovery_rows_missing",
         } as const;
+      }
+      if (!maintenanceAllowsRun(row.run, "native_restart_claim", true, input.maintenanceEnv)) {
+        return { kind: "blocked", runId: row.run.id, reason: "maintenance_hold" } as const;
       }
       if (isNativeRunnerOwnershipHeld(row.run)) {
         return {

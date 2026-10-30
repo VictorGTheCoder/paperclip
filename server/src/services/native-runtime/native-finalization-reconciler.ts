@@ -1,3 +1,4 @@
+import { maintenanceAllowsRun } from "../maintenance-admission.js";
 import { recoverLegacyUnsafeWorkspaceExports } from "./native-workspace-export-recovery.js";
 import { dismissAutomaticCompletionReviews, decisionHasRetiredAutomaticReview } from "./automatic-completion-reviews.js";
 import { logger } from "../../middleware/logger.js";
@@ -302,6 +303,7 @@ export function reconcileRetainedNativeSessionCleanups(
 }
 
 export async function dispatchNativeSessionResumptions(input: {
+  maintenanceEnv?: Record<string, string | undefined>;
   db: Db;
   runnerInstanceId: string;
   runIds?: string[];
@@ -321,6 +323,7 @@ export async function dispatchNativeSessionResumptions(input: {
  * independent of the live feature flag and legacy scheduler.
  */
 export async function claimNativeSessionResumptions(input: {
+  maintenanceEnv?: Record<string, string | undefined>;
   db: Db;
   runnerInstanceId: string;
   runIds?: string[];
@@ -374,6 +377,7 @@ export async function claimNativeSessionResumptions(input: {
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (!row) return false;
+      if (!maintenanceAllowsRun(row.run, "native_session_claim", true, input.maintenanceEnv)) return false;
       if (
         row.run.runtimeMode !== "native" ||
         isNativeRunnerOwnershipHeld(row.run) ||

@@ -1,3 +1,4 @@
+import { maintenanceAllowsRun, maintenanceStatus } from "./maintenance-admission.js";
 import { verifyPendingAddresseeWake } from "./pending-addressee-wake.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
@@ -1394,6 +1395,7 @@ export function stopTaskDrain(): { wasActive: boolean } {
  * this process did not finish.
  */
 export function getTaskDrainStatus(): {
+  maintenance: ReturnType<typeof maintenanceStatus>;
   draining: boolean;
   startedAt: Date | null;
   expiresAt: Date | null;
@@ -1405,6 +1407,7 @@ export function getTaskDrainStatus(): {
   const activeRuns = activeRunExecutionPromises.size;
   const pendingWakes = activeWakeupPromises.size;
   return {
+    maintenance: maintenanceStatus(),
     draining: state !== null,
     startedAt: state?.startedAt ?? null,
     expiresAt: state?.expiresAt ?? null,
@@ -10524,6 +10527,7 @@ export function heartbeatService(
       eq(agentWakeupRequests.status, "deferred_issue_execution"),
     ));
     if (!wake) return;
+    if (!maintenanceAllowsRun({ id: wake.runId ?? wake.id, companyId: wake.companyId, agentId: wake.agentId, contextSnapshot: wake.payload }, "deferred_comment", false, runtimeEnv)) return;
     const payload = parseObject(wake.payload);
     let actorId = readNonEmptyString(parseObject(payload.queuedCommentInterrupt).actorId);
     let commentIds = queuedCommentIdsFromWakePayload(payload);
@@ -15127,6 +15131,7 @@ export function heartbeatService(
     }
     const dispositions = await claimNativeRestartRecoveries({
       db,
+      maintenanceEnv: runtimeEnv,
       restartKind,
       recoveryRequestId: intent?.recoveryRequestId ?? null,
       coordinatedPreviousController: intent
@@ -17416,6 +17421,7 @@ export function heartbeatService(
     companyAgents?: AgentOrgRow[],
   ) {
     if (run.status !== "queued") return run;
+    if (!maintenanceAllowsRun(run, "queued_candidate", false, runtimeEnv)) return null;
     const agent = await getAgent(run.agentId);
     if (!agent) {
       await cancelRunInternal(
@@ -17717,6 +17723,8 @@ export function heartbeatService(
                 return { kind: "stale" as const, run: null };
               }
 
+              if (!maintenanceAllowsRun(lockedRun, "queued_comment_claim", true, runtimeEnv)) return { kind: "stale" as const, run: null };
+
               if (lockedRun.invocationSource === "automation") {
                 const admission = readChatControlRecoveryAdmission(lockedRun);
                 if (admission === "invalid")
@@ -17813,6 +17821,7 @@ export function heartbeatService(
                 // envelope. Preserve their established claim path; only an
                 // explicitly bound queued-message envelope is subject to the
                 // live-comment discard gate below.
+                if (!maintenanceAllowsRun(lockedRun, "queued_comment_commit", true, runtimeEnv)) return { kind: "stale" as const, run: null };
                 const [claimedRun] = await tx
                   .update(heartbeatRuns)
                   .set({
@@ -17900,6 +17909,7 @@ export function heartbeatService(
                 };
               }
 
+              if (!maintenanceAllowsRun(lockedRun, "queued_comment_commit", true, runtimeEnv)) return { kind: "stale" as const, run: null };
               await tx
                 .update(agentWakeupRequests)
                 .set({
@@ -17993,6 +18003,7 @@ export function heartbeatService(
             updatedAt: claimedAt,
           };
           if (nativeReviewContext) {
+            if (!maintenanceAllowsRun(run, "native_review_claim", true, runtimeEnv)) return null;
             if (run.scheduledRetryReason === "native_provider_overloaded") {
               const predecessor = await lockIssueExecutionClaim(tx);
               if (predecessor.blocked) return null;
@@ -18005,6 +18016,7 @@ export function heartbeatService(
           return tx.transaction(async (claimTx) => {
             const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
             if (issueClaim.blocked) return null;
+            if (!maintenanceAllowsRun(run, "ordinary_claim", true, runtimeEnv)) return null;
             const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
               eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued"),
             )).returning().then((rows) => rows[0] ?? null);
@@ -19244,6 +19256,7 @@ export function heartbeatService(
         ? []
         : await dispatchNativeSessionResumptions({
             db,
+            maintenanceEnv: runtimeEnv,
             runnerInstanceId:
               runtimeEnv.PAPERCLIP_INSTANCE_ID?.trim() || "paperclip-heartbeat",
             now,
@@ -19700,6 +19713,8 @@ export function heartbeatService(
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
     for (const wake of pendingInterrupts) {
+      const receipt = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)).then(rows => rows[0]);
+      if (!receipt || !maintenanceAllowsRun({ id: receipt.runId ?? receipt.id, companyId: receipt.companyId, agentId: receipt.agentId, contextSnapshot: receipt.payload }, "deferred_interrupt", false, runtimeEnv)) continue;
       await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
         eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
       ));
@@ -19726,6 +19741,7 @@ export function heartbeatService(
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
     for (const { wake } of strandedQueues) {
+      if (!maintenanceAllowsRun({ id: wake.runId ?? wake.id, companyId: wake.companyId, agentId: wake.agentId, contextSnapshot: wake.payload }, "deferred_queue", false, runtimeEnv)) continue;
       if (!queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
       const staleRecipientRunId = readNonEmptyString(parseObject(parseObject(wake.payload)._paperclipWakeContext).requeuedFromRunId);
@@ -20354,6 +20370,7 @@ export function heartbeatService(
         if ((await getSchedulingSuppression()).suppressed) return;
         await dispatchNativeSessionResumptions({
           db,
+          maintenanceEnv: runtimeEnv,
           runnerInstanceId:
             runtimeEnv.PAPERCLIP_INSTANCE_ID?.trim() || "paperclip-heartbeat",
           runIds: [runId],
@@ -20409,6 +20426,15 @@ export function heartbeatService(
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
     } = {},
   ) {
+    const admissionRun = await getRun(runId);
+    if (!admissionRun) return;
+    if (!maintenanceAllowsRun(admissionRun, "execute", true, runtimeEnv)) {
+      // Fresh queued claims use the existing atomic release path. Persisted
+      // native recovery claims retain their coordinator receipt for an explicit
+      // rearm/restart; never convert an existing session into a fresh queued run.
+      if (!runOptions.nativeLeaseOwner) await releaseRunClaimedJustBeforeSuppression(runId);
+      return;
+    }
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
     if ((await getSchedulingSuppression()).suppressed) {
@@ -26987,6 +27013,7 @@ export function heartbeatService(
   ) {
     try {
       const source = await getRun(run.id);
+      if (source && !maintenanceAllowsRun(source, "release_and_promote", false, runtimeEnv)) return;
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
         companyId: run.companyId,
         runId: run.id,

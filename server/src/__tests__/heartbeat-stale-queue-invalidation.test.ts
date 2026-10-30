@@ -1,3 +1,4 @@
+import { maintenancePolicyFixture } from "./maintenance-policy-fixture.js";
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -143,6 +144,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     | null = null;
 
   let beforePendingClaim: (() => Promise<void>) | null = null;
+  let maintenanceFixture: ReturnType<typeof maintenancePolicyFixture> | null = null;
+  const testRuntimeEnv = { ...process.env, PAPERCLIP_IN_WORKTREE: "false" };
 
   const countExecuteCallsForRun = (runId: string) =>
     mockAdapterExecute.mock.calls.filter(([context]) => context?.runId === runId).length;
@@ -151,7 +154,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-stale-queue-");
     db = createDb(tempDb.connectionString);
     heartbeat = heartbeatService(db, {
-      runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" },
+      runtimeEnv: testRuntimeEnv,
       beforeChatControlRecoveryCheck: async ({ stage }) => {
         if (stage === "claim" && beforePendingClaim) {
           const callback = beforePendingClaim; beforePendingClaim = null; await callback();
@@ -189,6 +192,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     // the TRUNCATE below runs.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     await cleanupHeartbeatInvalidationFixture(db);
+    if (maintenanceFixture) {
+      for (const key of Object.keys(maintenanceFixture.env)) delete testRuntimeEnv[key];
+      maintenanceFixture.cleanup(); maintenanceFixture = null;
+    }
   });
 
   afterAll(async () => {
@@ -1757,6 +1764,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         allowOther: true, options: [{ id: "yes", label: "Yes" }],
       }] },
     }, { agentId: architect });
+    if (process.env.PAPERCLIP_TEST_MAINTENANCE === "1") {
+      maintenanceFixture = maintenancePolicyFixture({ companyId, issueId, agentIds: [architect, victor] });
+      Object.assign(testRuntimeEnv, maintenanceFixture.env);
+    }
     return { companyId, architect, victor, issueId, interaction };
   }
 
