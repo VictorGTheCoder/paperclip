@@ -377,7 +377,7 @@ export async function claimNativeSessionResumptions(input: {
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (!row) return false;
-      if (!maintenanceAllowsRun(row.run, "native_session_claim", true, input.maintenanceEnv)) return false;
+      if (!maintenanceAllowsRun({ ...row.run, canonicalIssueId: row.coordinator.issueId }, "native_session_claim", true, input.maintenanceEnv)) return false;
       if (
         row.run.runtimeMode !== "native" ||
         isNativeRunnerOwnershipHeld(row.run) ||

@@ -548,7 +548,7 @@ export async function claimNativeRestartRecoveries(input: {
           reason: "recovery_rows_missing",
         } as const;
       }
-      if (!maintenanceAllowsRun(row.run, "native_restart_claim", true, input.maintenanceEnv)) {
+      if (!maintenanceAllowsRun({ ...row.run, canonicalIssueId: row.coordinator.issueId }, "native_restart_claim", true, input.maintenanceEnv)) {
         return { kind: "blocked", runId: row.run.id, reason: "maintenance_hold" } as const;
       }
       if (isNativeRunnerOwnershipHeld(row.run)) {

@@ -145,7 +145,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
 
   let beforePendingClaim: (() => Promise<void>) | null = null;
   let maintenanceFixture: ReturnType<typeof maintenancePolicyFixture> | null = null;
-  const testRuntimeEnv = { ...process.env, PAPERCLIP_IN_WORKTREE: "false" };
+  const testRuntimeEnv: Record<string, string | undefined> = { ...process.env, PAPERCLIP_IN_WORKTREE: "false" };
 
   const countExecuteCallsForRun = (runId: string) =>
     mockAdapterExecute.mock.calls.filter(([context]) => context?.runId === runId).length;

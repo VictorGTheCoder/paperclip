@@ -32,8 +32,8 @@ windowId to extend an exhausted test without renewed authorization.
 Checks restrict both ordinary and queued-comment claims, native review claims,
 native same-run and restart recovery claims, and execution entry. They never
 replace recipient checks, company membership, invokability, budgets, revision
-checks, approvals or existing recovery permissions. Deferred comment sweeps and
-promotion leave excluded receipts untouched. Cancellation remains native and
+checks, approvals or existing recovery permissions. Deferred comment sweeps leave excluded receipts untouched. Completion cleanup
+may release locks and promote receipts durably; admission still prevents execution. Cancellation remains native and
 cannot be undone by releasing maintenance. Completed work, documents, approvals
 and next actions remain in the database.
 

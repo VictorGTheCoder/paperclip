@@ -20,7 +20,7 @@ describe("restart-safe maintenance admission", () => {
   it("admits only the exact company, issue, agents and consistent persisted native identity", () => {
     const f = setup(); expect(maintenanceAllowsRun(run, "claim", true, f.env)).toBe(true);
     for (const change of [{ companyId: "other" }, { agentId: "engineer" }, { contextSnapshot: { issueId: "issue-97" } },
-      { contextSnapshot: {} }, { nativeIssueId: "issue-424" }]) expect(maintenanceAllowsRun({ ...run, ...change }, "claim", true, f.env)).toBe(false);
+      { contextSnapshot: {} }, { nativeIssueId: "issue-424" }, { canonicalIssueId: "issue-424" }]) expect(maintenanceAllowsRun({ ...run, ...change }, "claim", true, f.env)).toBe(false);
     expect(f.entries().filter(e => e.reserved)).toHaveLength(1);
   });
   it("denies each of the three observed unrelated Victor deferred wakes", () => {

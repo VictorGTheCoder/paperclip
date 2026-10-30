@@ -27013,7 +27013,6 @@ export function heartbeatService(
   ) {
     try {
       const source = await getRun(run.id);
-      if (source && !maintenanceAllowsRun(source, "release_and_promote", false, runtimeEnv)) return;
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
         companyId: run.companyId,
         runId: run.id,

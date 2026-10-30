@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 
 export const maintenanceBootId = randomUUID();
 type Env = Record<string, string | undefined>;
-type Run = { id: string; companyId: string; agentId: string; contextSnapshot: unknown; nativeIssueId?: string | null };
+type Run = { id: string; companyId: string; agentId: string; contextSnapshot: unknown; nativeIssueId?: string | null; canonicalIssueId?: string };
 type Policy = { version: 1; mode: "hold" | "issue" | "released"; bootId: string; windowId: string;
   companyId: string; issueId: string; agentIds: string[]; expiresAt: string; maxRuns: number };
 const record = (v: unknown): Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -56,7 +56,7 @@ export function maintenanceAllowsRun(run: Run, phase: string, reserve = false, e
   const issueId = typeof context.issueId === "string" ? context.issueId : run.nativeIssueId;
   // An inconsistent native issue identity is never eligible, even if one field matches.
   let allowed = state.mode === "released" || (state.mode === "issue" && !!p && p.companyId === run.companyId &&
-    p.issueId === issueId && (!run.nativeIssueId || run.nativeIssueId === p.issueId) && p.agentIds.includes(run.agentId));
+    p.issueId === issueId && (!run.nativeIssueId || run.nativeIssueId === p.issueId) && (!run.canonicalIssueId || run.canonicalIssueId === p.issueId) && p.agentIds.includes(run.agentId));
   let reason = allowed ? "scope_allowed" : "maintenance_hold";
   try {
     const audit = env.PAPERCLIP_MAINTENANCE_AUDIT;

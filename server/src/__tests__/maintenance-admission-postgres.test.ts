@@ -23,6 +23,13 @@ describe("maintenance admission at real PostgreSQL execution boundaries", () => 
   });
   afterAll(async () => temporary?.cleanup());
   async function seed() {
+    execute.mockImplementation(async (context: { runId: string }) => {
+      const source = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, context.runId)))[0];
+      // This trivial fixture really finishes its work. An unfinished task can
+      // legitimately request another native recovery run; that is not a replay.
+      if (source?.contextSnapshot?.issueId) await db.update(issues).set({ status: "done" }).where(eq(issues.id, String(source.contextSnapshot.issueId)));
+      return { exitCode: 0, signal: null, timedOut: false, summary: "Maintenance fixture completed", provider: "test", model: "test" };
+    });
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Maintenance fixture", issuePrefix: "MA", defaultResponsibleUserId: "responsible-user", requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values({ id: agentId, companyId, name: "Victor", status: "active", adapterType: "codex_local", runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } });
@@ -85,7 +92,14 @@ describe("maintenance admission at real PostgreSQL execution boundaries", () => 
       if (stage === "claim" && first) { first = false; reached(); await gate; }
     } });
     const claiming = heartbeat.resumeQueuedRuns();
-    await entered; await heartbeat.cancelRun(q.id, "Authorized test cancellation"); proceed(); await claiming; await heartbeat.drainActiveRunExecutions();
+    await entered;
+    const cancelling = heartbeat.cancelRun(q.id, "Authorized test cancellation", { suppressImmediateRecovery: true });
+    try {
+      const deadline = Date.now() + 5000;
+      while ((await run(q.id)).status !== "cancelled" && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+      expect((await run(q.id)).status).toBe("cancelled");
+    } finally { proceed(); }
+    await Promise.all([claiming, cancelling]); await heartbeat.drainActiveRunExecutions();
     expect((await run(q.id)).status).toBe("cancelled"); expect(execute).not.toHaveBeenCalled();
     policy!.write({ mode: "released" }); await heartbeat.resumeQueuedRuns(); await heartbeat.drainActiveRunExecutions();
     expect((await run(q.id)).status).toBe("cancelled"); expect(execute).not.toHaveBeenCalled();
