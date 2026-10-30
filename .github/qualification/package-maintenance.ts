@@ -24,7 +24,7 @@ for(const [i,e] of entries.entries()){
    }
   }
   fs.writeFileSync(path.join(stage,'package.json'),JSON.stringify(packed,null,2)+'\n');
-  run('npm',['pack',stage,'--pack-destination',packs]);
+  run('npm',['pack','--ignore-scripts',stage,'--pack-destination',packs]);
  } else run('pnpm',['--dir',dir,'pack','--pack-destination',packs],root,{PAPERCLIP_RELEASE_REUSE_UI_DIST:'1'});
 }
 run('npm',['pack','--pack-destination',packs],path.resolve('cli'));
