@@ -1,5 +1,5 @@
 name: Controlled maintenance release build
-run-name: Issue-contained maintenance release d170147b9
+run-name: Issue-contained maintenance release 86e229d02
 on:
   workflow_dispatch:
 permissions:
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      RELEASE_SHA: d170147b9
+      RELEASE_SHA: 86e229d02
       NODE_OPTIONS: --max-old-space-size=8192
       CARGO_BUILD_JOBS: 2
       GOMEMLIMIT: 6GiB
@@ -57,6 +57,8 @@ jobs:
           pnpm run preflight:workspace-links
           pnpm -r --workspace-concurrency=1 build 2>&1 | tee evidence/build.log
           echo 0 > evidence/build.exit
+      - name: Preserve compiled workspace for packaging recovery
+        run: tar --exclude=node_modules -czf evidence/compiled-workspace.tar.gz packages server ui cli skills scripts pnpm-lock.yaml package.json pnpm-workspace.yaml patches tsconfig.base.json
       - name: Complete typecheck
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
@@ -74,9 +76,13 @@ jobs:
           set -euo pipefail
           cd server
           ../node_modules/.bin/vitest run src/__tests__/maintenance-admission.test.ts src/__tests__/maintenance-admission-postgres.test.ts src/__tests__/heartbeat-task-drain.test.ts src/__tests__/heartbeat-task-drain-admission-release.test.ts src/__tests__/native-session-resumption.test.ts --testTimeout=60000 --reporter=json --outputFile=../evidence/containment-tests.json > ../evidence/containment-tests.log 2>&1
+      - name: Gated routing and revision regressions
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cd server
           PAPERCLIP_TEST_MAINTENANCE=1 ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t 11932 --testTimeout=60000 --reporter=json --outputFile=../evidence/gated-routing-tests.json > ../evidence/gated-routing-tests.log 2>&1
-      - name: Preserve compiled workspace for packaging recovery
-        run: tar --exclude=node_modules -czf evidence/compiled-workspace.tar.gz packages server ui cli skills scripts pnpm-lock.yaml package.json pnpm-workspace.yaml patches tsconfig.base.json
+          ../node_modules/.bin/vitest run src/__tests__/issue-thread-interactions-service.test.ts -t "revision|rejected|human_only|not_creator" --testTimeout=60000 --reporter=json --outputFile=../evidence/revision-tests.json > ../evidence/revision-tests.log 2>&1
       - name: Build installable payload with native packaging
         run: |
           set -o pipefail
