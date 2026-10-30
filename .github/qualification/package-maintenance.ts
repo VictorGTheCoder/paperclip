@@ -31,6 +31,11 @@ run('npm',['pack','--pack-destination',packs],path.resolve('cli'));
 const tarballs=fs.readdirSync(packs).filter(x=>x.endsWith('.tgz')).map(x=>path.join(packs,x));
 if(tarballs.length!==entries.length+1)throw Error('Missing package tarball');
 run('npm',['install','--prefix',payload,...tarballs,'--no-audit','--no-fund']);
+const platformDir=path.join(payload,'node_modules/@embedded-postgres/linux-x64');
+const platformPackage=JSON.parse(fs.readFileSync(path.join(platformDir,'package.json'),'utf8'));
+if(platformPackage.version!=='18.1.0-beta.16')throw Error('Unexpected embedded PostgreSQL platform version');
+run('node',[path.join(platformDir,'scripts/hydrate-symlinks.js')],platformDir);
+run(path.join(platformDir,'native/bin/initdb'),['--version']);
 run('node',[path.join(payload,'node_modules/paperclipai/dist/index.js'),'--version']);
 for(const e of entries){
  const installed=JSON.parse(fs.readFileSync(path.join(payload,'node_modules',e.name,'package.json'),'utf8'));
@@ -44,5 +49,5 @@ if(stamp.commit!==process.env.RELEASE_SHA)throw Error('Installed stamp mismatch'
 if(!fs.existsSync(path.join(payload,'node_modules/@paperclipai/server/ui-dist/index.html')))throw Error('Missing UI');
 fs.writeFileSync(path.join(out,'package-provenance.json'),JSON.stringify({source:process.env.RELEASE_SHA,node:process.version,platform:process.platform,arch:process.arch,workspacePackages:entries,installedStamp:stamp,packaging:'Native git installer package closure and bundled-dependency preparation; prebuilt payload, no install or network required at activation'},null,2));
 fs.copyFileSync(path.join(payload,'package-lock.json'),path.join(out,'installed-package-lock.json'));
-run('git',['restore','cli/package.json']);
+run('git',['restore','cli/package.json','cli/README.md']);
 run('tar',['-czf',path.join(out,'paperclip-maintenance-linux-x64.tar.gz'),'-C',out,'payload','package-provenance.json']);

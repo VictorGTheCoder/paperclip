@@ -65,6 +65,7 @@ jobs:
         run: |
           set -o pipefail
           node cli/node_modules/tsx/dist/cli.mjs .github/package-maintenance.ts 2>&1 | tee evidence/packaging.log
+          git diff > evidence/post-pack-source.diff
           test -z "$(git diff --name-only)"
           git status --porcelain > evidence/final-status.txt
           cd release-output
@@ -76,6 +77,7 @@ jobs:
           path: evidence/
           retention-days: 30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
           name: paperclip-maintenance-linux-x64
           path: |
