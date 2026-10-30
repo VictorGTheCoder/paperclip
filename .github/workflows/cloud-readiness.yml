@@ -69,6 +69,8 @@ jobs:
           pnpm exec vitest run packages/adapter-utils/src/server-utils.test.ts --reporter=json --outputFile=evidence/recovery-tests.json > evidence/recovery-tests.log 2>&1
           cd server
           ../node_modules/.bin/vitest run src/__tests__/heartbeat-stale-queue-invalidation.test.ts -t 11932 --testTimeout=60000 --reporter=json --outputFile=../evidence/routing-tests.json > ../evidence/routing-tests.log 2>&1
+      - name: Preserve compiled workspace for packaging recovery
+        run: tar --exclude=node_modules -czf evidence/compiled-workspace.tar.gz packages server ui cli skills scripts pnpm-lock.yaml package.json pnpm-workspace.yaml patches tsconfig.base.json
       - name: Build installable payload with native packaging
         run: |
           set -o pipefail
