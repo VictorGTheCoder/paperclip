@@ -27715,6 +27715,27 @@ export function heartbeatService(
           );
           if (durableReceipt)
             return { kind: "durable" as const, receipt: durableReceipt };
+          // The issue lock serializes repeated operator intents, including
+          // receipts whose provider failed or was cancelled. The same intent
+          // reports its existing outcome; retry requires a distinct intent.
+          const responseCardId = pendingInteractionId(enrichedContextSnapshot);
+          if (reason === "interaction_response_requested" && source === "on_demand" &&
+              opts.manualUserWake && opts.requestedByActorType === "user" &&
+              responseCardId && opts.idempotencyKey) {
+            const [existingResponse] = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+            )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1);
+            if (existingResponse) {
+              if (existingResponse.agentId !== agentId ||
+                  existingResponse.requestedByActorType !== opts.requestedByActorType ||
+                  existingResponse.requestedByActorId !== opts.requestedByActorId ||
+                  existingResponse.payload?.issueId !== issueId ||
+                  existingResponse.payload?.interactionId !== responseCardId)
+                throw conflict("This interaction response intent belongs to a different scope.");
+              return { kind: "durable" as const, receipt: existingResponse };
+            }
+          }
           const failedChatRetry = await authorizeFailedChatRunRetryWake(
             db,
             tx as unknown as Db,

@@ -6142,7 +6142,14 @@ export function agentRoutes(
       // Ignore all caller context/purpose markers; preserve the old cancelled
       // receipt and admit this independently authorized, idempotent intent.
       wakePayload = { issueId, interactionId };
-      wakeIdempotencyKey = req.body.idempotencyKey.trim();
+      // Use the persisted interaction namespace's unique receipt fence. Bind
+      // the caller's stable intent to its authorized actor and recipient scope;
+      // neither a raw caller key nor another card may alias this request.
+      wakeIdempotencyKey = `interaction:${interactionId}:operator:${sha256Digest({
+        actorType: req.actor.type, actorId: req.actor.userId ?? null,
+        companyId: agent.companyId, agentId: agent.id, issueId, interactionId,
+        reason: "interaction_response_requested", key: req.body.idempotencyKey.trim(),
+      })}`;
       requestedInteractionContext = { ...hint, interactionResponder: responder };
     }
     let retryConversationContext: Record<string, unknown> = {};
