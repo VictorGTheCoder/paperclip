@@ -41,6 +41,7 @@ import {
 } from "./status-decision-committer.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueService } from "../issues.js";
+import { pendingInteractionId, readPendingInteractionResponder } from "../pending-interaction-responder.js";
 import { publishChatPublicationCommitSignal } from "../chat-publication-reconciliation.js";
 import { nativeSha256 } from "./canonical.js";
 import {
@@ -1273,6 +1274,16 @@ export async function finalizeNativeRun(input: {
         : Promise.resolve(null),
     ]);
     const reviewContext = readNativeReviewAssignmentContext(run.contextSnapshot);
+    const responderId = pendingInteractionId(run.contextSnapshot);
+    const interactionResponder = responderId ? await readPendingInteractionResponder(input.db, {
+      companyId: run.companyId, issueId: authoritativeIssue.id, agentId: run.agentId,
+      runId: run.id, responsibleUserId: run.responsibleUserId,
+      contextSnapshot: run.contextSnapshot, allowResolvedByRunId: run.id,
+    }) : null;
+    const responderCard = interactionResponder ? await input.db.select({ status: issueThreadInteractions.status })
+      .from(issueThreadInteractions).where(and(eq(issueThreadInteractions.id, interactionResponder.interactionId),
+        eq(issueThreadInteractions.companyId, run.companyId), eq(issueThreadInteractions.issueId, authoritativeIssue.id)))
+      .then(rows => rows[0]) : null;
     const nativeReview = reviewContext ? await getNativeReviewAssignment(input.db, {
       companyId: run.companyId, issueId: authoritativeIssue.id, agentId: run.agentId,
       contextSnapshot: reviewContext, allowResolvedByRunId: run.id,
@@ -1285,6 +1296,8 @@ export async function finalizeNativeRun(input: {
       (reviewContext ? nativeReview?.interaction.status === "pending"
         : authoritativeIssue.assigneeAgentId === run.agentId && !authoritativeIssue.assigneeUserId);
     const proposedDecision = resolveNativeFinalizerStatus({
+      ...(responderId ? { interactionResponderOutcome: !interactionResponder || !responderCard
+        ? "stale" as const : responderCard.status === "pending" ? "pending" as const : "resolved" as const } : {}),
       providerModelRejected: providerFailure?.errorCode === "native_provider_model_rejected" && ownsProviderFailureDecision,
       providerOverloaded: providerFailure?.errorCode === "native_provider_overloaded" && ownsProviderFailureDecision,
       providerFailureSuperseded: providerFailure?.errorCode === "native_provider_overloaded" && !ownsProviderFailureDecision,

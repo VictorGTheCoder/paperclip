@@ -48,10 +48,13 @@ import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { claimNativeReviewExecutionLock, getNativeReviewAssignment } from "./native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-review-dispatch.js";
 import { stageNativeRunnerWakeAttachments } from "./native-runner-file-handoff.js";
+import { PaperclipRunnerSemanticAuthority } from "./runner-semantic-authority.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 import { nativeCompletionFeedback } from "./native-completion-feedback.js";
 import { assertCurrentWakeCommentsRead } from "./current-wake-comments.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
+import { readPendingInteractionResponder } from "../pending-interaction-responder.js";
+import { verifyLocalAgentJwt } from "../../agent-auth-jwt.js";
 import { childReviewOutcomes } from "./child-review-outcomes.js";
 import { createPostgresRunDispatchAdapter } from "../../modules/run-dispatch/adapters/postgres.js";
 import { materializeRuntimeQuestionFallback } from "./native-session-executor.js";
@@ -1878,4 +1881,105 @@ describe("PaperclipControlPlanePort conformance", () => {
       ]);
     }
   });
+  it("limits a named native question responder to its real card and uses the authenticated respond route", async () => {
+    const identity = CONTROL_PLANE_CONFORMANCE_OPEN.identity;
+    const ownerId = randomUUID(), responderId = randomUUID(), issueId = randomUUID();
+    const ownerRunId = randomUUID(), responderRunId = randomUUID(), cardId = randomUUID();
+    await db.insert(agents).values([
+      { id: ownerId, companyId: identity.companyId, name: "Question author", role: "engineer", status: "idle", adapterType: "process",
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } } },
+      { id: responderId, companyId: identity.companyId, name: "Question responder", role: "engineer", status: "running", adapterType: "codex_local" },
+    ]);
+    await db.insert(companyMemberships).values([ownerId, responderId].map(id => ({
+      companyId: identity.companyId, principalType: "agent" as const, principalId: id, membershipRole: "member",
+    })));
+    await db.insert(issues).values({ id: issueId, companyId: identity.companyId,
+      title: "Author retains task ownership", status: "in_review", assigneeAgentId: ownerId });
+    await db.insert(heartbeatRuns).values([
+      { id: ownerRunId, companyId: identity.companyId, agentId: ownerId, status: "running", runtimeMode: "native", nativeIssueId: issueId },
+      { id: responderRunId, companyId: identity.companyId, agentId: responderId, status: "running", runtimeMode: "native", nativeIssueId: issueId,
+        contextSnapshot: { issueId, interactionId: cardId, wakeReason: "interaction_pending", source: "issue.interaction.created" } },
+    ]);
+    await db.update(issues).set({ executionRunId: ownerRunId, checkoutRunId: ownerRunId }).where(eq(issues.id, issueId));
+    await db.insert(issues).values({ id: randomUUID(), companyId: identity.companyId,
+      parentId: issueId, title: "Child work outside this response-only scope", status: "todo", assigneeAgentId: ownerId });
+    const payload = { version: 1 as const, questions: [{ id: "scope", prompt: "Which approved scope?", selectionMode: "single" as const, required: true,
+      options: [{ id: "existing", label: "Existing scope" }, { id: "other", label: "Other scope" }] }] };
+    await db.insert(issueThreadInteractions).values({ id: cardId, companyId: identity.companyId, issueId,
+      kind: "ask_user_questions", status: "pending", addresseeAgentId: responderId, createdByAgentId: ownerId,
+      sourceRunId: ownerRunId, effectiveResolverPolicy: "not_creator", requestedResolverPolicy: "not_creator", payload });
+    const contextSnapshot = { issueId, interactionId: cardId, wakeReason: "interaction_pending", source: "issue.interaction.created" };
+    const scope = await readPendingInteractionResponder(db, { companyId: identity.companyId, issueId,
+      agentId: responderId, runId: responderRunId, contextSnapshot });
+    expect(scope).not.toBeNull();
+    await db.update(heartbeatRuns).set({ contextSnapshot: { ...contextSnapshot, interactionResponder: scope! } }).where(eq(heartbeatRuns.id, responderRunId));
+    const express = (await import("express")).default;
+    const { issueRoutes } = await import("../../routes/issues.js");
+    const { errorHandler } = await import("../../middleware/index.js");
+    const app = express();
+    const paths: string[] = [];
+    app.use(express.json());
+    app.use((req, res, next) => {
+      paths.push(req.path);
+      const token = req.header("Authorization")?.replace(/^Bearer /, "") ?? "";
+      const claims = verifyLocalAgentJwt(token);
+      if (!claims) { res.status(401).end(); return; }
+      req.actor = { type: "agent", source: "agent_jwt", companyId: claims.company_id,
+        agentId: claims.sub, runId: claims.run_id };
+      next();
+    });
+    app.use("/api", issueRoutes(db, {} as never));
+    app.use(errorHandler);
+    const oldSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "disposable-native-response-test-secret";
+    const server = await new Promise<ReturnType<typeof app.listen>>(resolve => { const listener = app.listen(0, "127.0.0.1", () => resolve(listener)); });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Test API listener unavailable");
+      const authority = new PaperclipRunnerToolAuthority(db, { companyId: identity.companyId, issueId, agentId: responderId,
+        runId: responderRunId, pendingInteractionResponder: scope!, apiUrl: `http://127.0.0.1:${address.port}/api` });
+      expect(authority.definitions().map(tool => tool.name)).toEqual([
+        "get_task_context", "get_task_history", "list_documents", "read_document", "list_document_revisions", "resolve_interaction",
+      ]);
+      const semantic = new PaperclipRunnerSemanticAuthority(db, { companyId: identity.companyId, issueId,
+        agentId: responderId, runId: responderRunId, pendingInteractionResponder: scope! });
+      await expect(semantic.dispatch({ callId: "named-semantic-read", operationId: "get_task_context", input: {},
+        correlation: { runId: responderRunId, normalizedSessionId: identity.sessionId, turnId: "named-turn", itemId: "named-item" },
+      })).resolves.toMatchObject({ ok: true, value: { assignedInteraction: { id: cardId }, activeTask: { id: issueId } } });
+
+      await expect(authority.execute({ tool: "get_task_context", callId: "named-read", arguments: {} }))
+        .resolves.toMatchObject({ assignedInteraction: { id: cardId, payload }, activeTask: { assigneeAgentId: ownerId } });
+      const scopedContext = await authority.execute({ tool: "get_task_context", callId: "no-cross-task-context", arguments: {} });
+      expect(scopedContext).not.toHaveProperty("childTasks");
+      expect(scopedContext).not.toHaveProperty("childReviewOutcomes");
+      expect(scopedContext).not.toHaveProperty("sourcePlanApproval");
+      for (const tool of ["write_document", "get_workspace", "call_api", "set_dependencies"])
+        await expect(authority.execute({ tool, callId: `denied-${tool}`, arguments: {} })).rejects.toThrow("may only inspect");
+      await expect(authority.execute({ tool: "resolve_interaction", callId: "input-target-override", arguments: {
+        decision: "answer", interactionId: randomUUID(), answers: [],
+      } })).rejects.toThrow("target overrides are not allowed");
+      const wrong = new PaperclipRunnerToolAuthority(db, { companyId: identity.companyId, issueId, agentId: responderId,
+        runId: responderRunId, pendingInteractionResponder: { ...scope!, interactionId: randomUUID() } });
+      await expect(wrong.execute({ tool: "get_task_context", callId: "wrong-card", arguments: {} })).rejects.toThrow("no longer assigned");
+      await db.update(issueThreadInteractions).set({ effectiveResolverPolicy: "human_only" }).where(eq(issueThreadInteractions.id, cardId));
+      await expect(authority.execute({ tool: "get_task_context", callId: "human-only", arguments: {} })).rejects.toThrow("no longer assigned");
+      await db.update(issueThreadInteractions).set({ effectiveResolverPolicy: "not_creator" }).where(eq(issueThreadInteractions.id, cardId));
+      await expect(authority.execute({ tool: "resolve_interaction", callId: "answer-real-card", arguments: {
+        decision: "answer", answers: [{ questionId: "scope", optionIds: ["existing"] }],
+      } })).resolves.toMatchObject({ interactionId: cardId, status: "answered" });
+      expect(paths).toContain(`/api/issues/${issueId}/interactions/${cardId}/respond`);
+      expect(paths.some(path => path.includes("/api/api/") || path.endsWith("/answer"))).toBe(false);
+      const [answered] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, cardId));
+      expect(answered).toMatchObject({ status: "answered", resolvedByAgentId: responderId, resolvedByRunId: responderRunId });
+      await expect(authority.execute({ tool: "get_task_context", callId: "own-receipt-read", arguments: {} })).resolves.toMatchObject({ assignedInteraction: { status: "answered" } });
+      await expect(authority.execute({ tool: "resolve_interaction", callId: "second-answer", arguments: { decision: "answer", answers: [] } })).rejects.toThrow("already been answered");
+      const [owned] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(owned).toMatchObject({ assigneeAgentId: ownerId, executionRunId: ownerRunId, checkoutRunId: ownerRunId });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      if (oldSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+      else process.env.PAPERCLIP_AGENT_JWT_SECRET = oldSecret;
+    }
+  }, 120_000);
+
 });

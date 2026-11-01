@@ -1,3 +1,4 @@
+import { legacyExecutionNeedsReconciliation } from "../../../services/legacy-execution-recovery.js";
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -190,6 +191,32 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       key: ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
     });
   }
+
+  it.each([false, true])("records no-provider receipt only for never-claimed stale response (started=%s)", async started => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await seedIssue({ companyId, issueId, assigneeAgentId: agentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId, contextSnapshot: {
+      issueId, interactionId: randomUUID(), wakeReason: "interaction_pending", source: "issue.interaction.created",
+    } });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", scheduledRetryAttempt: 3,
+      startedAt: started ? new Date() : null }).where(eq(heartbeatRuns.id, runId));
+    expect(await createPostgresRunDispatchAdapter(db).cancelStaleQueuedRun({ companyId, runId,
+      expectedStatus: "queued", now: new Date() })).toMatchObject({ outcome: "cancelled",
+      errorCode: "interaction_response_not_current" });
+    const [row] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(legacyExecutionNeedsReconciliation(row!)).toBe(started);
+    if (started) {
+      expect(row!.resultJson?.executionRecovery).toBeUndefined();
+    } else {
+      expect(row!.resultJson?.cancellation).toMatchObject({ source: "control_plane", expected: true });
+      expect(row!.resultJson?.executionRecovery).toMatchObject({ kind: "interaction_response_preclaim", runId,
+        providerWorkStarted: false });
+      // A receipt copied onto a started or incompletely loaded run is not proof.
+      expect(legacyExecutionNeedsReconciliation({ ...row!, startedAt: new Date() })).toBe(true);
+      expect(legacyExecutionNeedsReconciliation({ ...row!, startedAt: undefined })).toBe(true);
+    }
+  });
 
   it.each([
     ["executionRunId", "native_safe_replacement"], ["checkoutRunId", "native_safe_replacement"],

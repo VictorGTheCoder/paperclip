@@ -1,3 +1,5 @@
+import { hasNeverClaimedInteractionResponse } from "../../../services/interaction-response-preclaim.js";
+import { pendingInteractionId, readPendingInteractionResponder } from "../../../services/pending-interaction-responder.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -69,6 +71,8 @@ import { RunDispatchApplicationError } from "../application/types.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type LoadGateFactsInput = {
+  /** Loaded from the company-scoped persisted run by every private caller. */
+  responsibleUserId: string | null;
   conversationContinuation: boolean;
   runId: string;
   companyId: string;
@@ -82,6 +86,8 @@ type LoadGateFactsResult =
   | { agentFound: true; facts: ScheduledRetryFacts }
   | { agentFound: false; issueId: string | null };
 type LoadStalenessFactsInput = {
+  /** Loaded from the locked persisted run, never the caller context payload. */
+  responsibleUserId: string | null;
   runId: string;
   companyId: string;
   agentId: string;
@@ -357,6 +363,12 @@ export function createPostgresRunDispatchAdapter(
 
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
+    facts.pendingInteractionResponderRequested = Boolean(pendingInteractionId(input.contextSnapshot));
+    facts.isPendingInteractionResponder = Boolean(await readPendingInteractionResponder(dbOrTx, {
+      companyId: input.companyId, issueId, agentId: input.agentId, runId: input.runId,
+      responsibleUserId: input.responsibleUserId, contextSnapshot: input.contextSnapshot,
+      lockForUpdate: Boolean(tx),
+    }));
     facts.issueExecutionRunId = issue.executionRunId;
     facts.issueCheckoutRunId = issue.checkoutRunId;
     if (input.conversationContinuation) {
@@ -459,6 +471,7 @@ export function createPostgresRunDispatchAdapter(
         runId: run.id,
         companyId: run.companyId,
         agentId: run.agentId,
+        responsibleUserId: run.responsibleUserId,
         conversationContinuation: run.runtimeMode === "legacy" && hasConversationContinuationPolicy(run.resultJson),
         contextSnapshot: parseObject(run.contextSnapshot),
         scheduledRetryReason: run.scheduledRetryReason,
@@ -527,6 +540,11 @@ export function createPostgresRunDispatchAdapter(
       (rows) => rows[0] ?? null,
     );
 
+    const isPendingInteractionResponder = Boolean(await readPendingInteractionResponder(dbOrTx, {
+      companyId: input.companyId, issueId: input.issueId, agentId: input.agentId, runId: input.runId,
+      responsibleUserId: input.responsibleUserId, contextSnapshot: context,
+      lockForUpdate: Boolean(tx),
+    }));
     const wakeCommentId = deriveCommentId(context);
     const isInteractionWake = allowsIssueInteractionWake(
       context,
@@ -605,6 +623,8 @@ export function createPostgresRunDispatchAdapter(
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
+      isPendingInteractionResponder,
+      pendingInteractionResponderRequested: Boolean(pendingInteractionId(context)),
       isAuthorizedSourceScopedRecovery,
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,
@@ -760,6 +780,7 @@ export function createPostgresRunDispatchAdapter(
           runId: run.id,
           companyId: run.companyId,
           agentId: run.agentId,
+          responsibleUserId: run.responsibleUserId,
           conversationContinuation: run.runtimeMode === "legacy" && hasConversationContinuationPolicy(run.resultJson),
           contextSnapshot: parseObject(run.contextSnapshot),
           scheduledRetryReason: run.scheduledRetryReason,
@@ -877,6 +898,14 @@ export function createPostgresRunDispatchAdapter(
           resultJson: {
             ...parseObject(run.resultJson),
             stopReason: decision.errorCode,
+            ...(decision.errorCode === "interaction_response_not_current" && expectedStatus === "queued" &&
+              hasNeverClaimedInteractionResponse(run) ? {
+                cancellation: { source: "control_plane", expected: true,
+                  initiator: { type: "system", id: "run-dispatch" },
+                  reason: decision.reason, recordedAt: now.toISOString() },
+                executionRecovery: { kind: "interaction_response_preclaim", runId: run.id,
+                  providerWorkStarted: false },
+              } : {}),
             ...(decision.errorCode === "execution_reconciliation_required"
               ? { executionWait: decision.details }
               : {}),
@@ -961,6 +990,7 @@ export function createPostgresRunDispatchAdapter(
         runId: run.id,
         companyId: run.companyId,
         agentId: run.agentId,
+        responsibleUserId: run.responsibleUserId,
         issueId,
         contextSnapshot,
         scheduledRetryReason: run.scheduledRetryReason,

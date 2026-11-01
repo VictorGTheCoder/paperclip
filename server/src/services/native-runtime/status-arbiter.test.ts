@@ -44,6 +44,18 @@ function arbitrate(
 }
 
 describe("native status authority", () => {
+  it("never lets an addressed responder finish or block its author's task", () => {
+    for (const interactionResponderOutcome of ["pending", "resolved", "stale"] as const) {
+      for (const priorIssueStatus of ["in_progress", "in_review", "blocked", "done"] as const) {
+        for (const terminalState of ["succeeded", "failed", "cancelled"] as const) {
+          expect(arbitrate({ interactionResponderOutcome, priorIssueStatus, terminalState,
+            workspaceFinalizeStatus: "failed", providerModelRejected: true })).toMatchObject({
+            statusAction: "preserve", toStatus: priorIssueStatus, effects: [],
+          });
+        }
+      }
+    }
+  });
   it("schedules a capacity retry while preserving partial work and review authority", () => {
     for (const nativeReviewOutcome of [undefined, "pending"] as const) {
       const decision = arbitrate({ terminalState: "failed", providerOverloaded: true, nativeReviewOutcome });

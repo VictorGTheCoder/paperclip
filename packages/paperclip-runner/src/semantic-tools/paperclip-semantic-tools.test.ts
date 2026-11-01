@@ -612,3 +612,31 @@ class MemoryIdempotencyStore implements PaperclipSemanticIdempotencyStore {
     this.#tokenToScope.delete(token);
   }
 }
+
+describe("server-verified interaction responder read scope", () => {
+  it("permits same-task reads without falsifying ownership, and never grants mutations or discovery", async () => {
+    const context: PaperclipSemanticRunContext = {
+      ...runContext({ actorClaims: ["discovery:tasks:read"], delegatedClaims: ["discovery:tasks:read"] }),
+      activeTask: { ...runContext().activeTask, assigneeActorId: "author", executionRunId: "author-run" },
+      interactionResponder: { interactionId: "pending-card" },
+    };
+    const dispatcher = new PaperclipSemanticDispatcher({ contextProvider: () => context,
+      bindings: [binding("get_task_context", { task: "visible" }), binding("search_tasks", { tasks: [] }),
+        binding("write_document", { written: true })] });
+    expect(await dispatcher.listAlwaysAvailableTools(correlation.runId)).toMatchObject([{ name: "get_task_context" }]);
+    expect(await dispatcher.dispatch(call("get_task_context", {}))).toMatchObject({ ok: true });
+    expect(await dispatcher.dispatch(call("search_tasks", { query: "x" }))).toMatchObject({ ok: false, error: { code: "task_ownership_denied" } });
+    expect(await dispatcher.dispatch(call("write_document", { key: "x", body: "x" }))).toMatchObject({ ok: false, error: { code: "task_ownership_denied" } });
+    expect(context.activeTask.assigneeActorId).toBe("author");
+  });
+  it("loses read authority as soon as the server withdraws the verified responder context", async () => {
+    let context: PaperclipSemanticRunContext = { ...runContext(), interactionResponder: { interactionId: "card" },
+      activeTask: { ...runContext().activeTask, assigneeActorId: "author", executionRunId: "author-run" } };
+    const dispatcher = new PaperclipSemanticDispatcher({ contextProvider: () => context,
+      bindings: [binding("get_task_context", { task: "visible" })] });
+    expect(await dispatcher.listAlwaysAvailableTools(correlation.runId)).toHaveLength(1);
+    const { interactionResponder: _removed, ...revoked } = context;
+    context = revoked;
+    expect(await dispatcher.dispatch(call("get_task_context", {}))).toMatchObject({ ok: false, error: { code: "task_ownership_denied" } });
+  });
+});

@@ -1,3 +1,4 @@
+import { readPendingInteractionResponder, type PendingInteractionResponder } from "../pending-interaction-responder.js";
 import { and, desc, eq, isNull } from "drizzle-orm";
 
 import type { Db } from "@paperclipai/db";
@@ -8,6 +9,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
 import {
@@ -23,6 +25,7 @@ import {
 } from "../../vendor/paperclip-runner/index.js";
 
 export interface PaperclipRunnerSemanticBinding {
+  readonly pendingInteractionResponder?: PendingInteractionResponder;
   readonly companyId: string;
   readonly issueId: string;
   readonly runId: string;
@@ -110,7 +113,7 @@ export class PaperclipRunnerSemanticAuthority {
       operationId,
       execute: async (invocation) => {
         const context = await this.#loadBoundContext();
-        this.#assertActiveContext(context, true);
+        await this.#assertActiveContext(context, true);
         const input = invocation.input;
         switch (operationId) {
           case "get_task_context":
@@ -124,6 +127,12 @@ export class PaperclipRunnerSemanticAuthority {
                   title: context.agent.title,
                   capabilities: context.agent.capabilities,
                 },
+                ...(this.#binding.pendingInteractionResponder ? {
+                  assignedInteraction: (await this.#db.select().from(issueThreadInteractions).where(and(
+                    eq(issueThreadInteractions.id, this.#binding.pendingInteractionResponder.interactionId),
+                    eq(issueThreadInteractions.companyId, this.#binding.companyId),
+                    eq(issueThreadInteractions.issueId, this.#binding.issueId))))[0],
+                } : {}),
                 activeTask: {
                   id: context.issue.id,
                   identifier: context.issue.identifier,
@@ -281,8 +290,9 @@ export class PaperclipRunnerSemanticAuthority {
       throw new Error("paperclip_runner_semantic_run_mismatch");
     }
     const context = await this.#loadBoundContext();
-    this.#assertActiveContext(context, false);
+    await this.#assertActiveContext(context, false);
     return {
+      ...(this.#binding.pendingInteractionResponder ? { interactionResponder: { interactionId: this.#binding.pendingInteractionResponder.interactionId } } : {}),
       runId: context.run.id,
       companyId: context.run.companyId,
       actor: {
@@ -337,11 +347,20 @@ export class PaperclipRunnerSemanticAuthority {
     return row;
   }
 
-  #assertActiveContext(context: BoundContext, requireOwnership: boolean): void {
+  async #assertActiveContext(context: BoundContext, requireOwnership: boolean): Promise<void> {
+    const responder = this.#binding.pendingInteractionResponder;
+    if (responder) {
+      const current = await readPendingInteractionResponder(this.#db, {
+        ...this.#binding, contextSnapshot: context.run.contextSnapshot,
+        responsibleUserId: context.run.responsibleUserId, allowResolvedByRunId: this.#binding.runId,
+      });
+      if (!current || current.interactionId !== responder.interactionId)
+        throw new Error("paperclip_runner_semantic_interaction_inactive");
+    }
     if (
       !["queued", "running"].includes(context.run.status) ||
       activeAgentStatus(context.agent.status) !== "active" ||
-      (requireOwnership &&
+      (requireOwnership && !responder &&
         (context.issue.assigneeAgentId !== this.#binding.agentId ||
           context.issue.executionRunId !== this.#binding.runId))
     ) {

@@ -1,3 +1,4 @@
+import { readPendingInteractionResponder, type PendingInteractionResponder } from "../pending-interaction-responder.js";
 import { setIssueTitle } from "../issue-title.js";
 import { externalObjectService } from "../external-objects.js";
 import { instanceSettingsService } from "../instance-settings.js";
@@ -110,6 +111,8 @@ const NATIVE_REVIEW_READ_TOOLS = new Set([
 type Binding = {
   /** Server-derived scope for one addressed native completion review. */
   nativeReview?: NativeReviewAssignmentContext;
+  /** Server-admitted response-only purpose; never source-task execution authority. */
+  pendingInteractionResponder?: PendingInteractionResponder;
   companyId: string;
   issueId: string;
   runId: string;
@@ -185,9 +188,23 @@ function canonicalJson(value: unknown): string {
 }
 
 export class PaperclipRunnerToolAuthority {
-  constructor(readonly db: Db, readonly binding: Binding) {}
+  constructor(readonly db: Db, readonly binding: Binding) {
+    if (binding.nativeReview && binding.pendingInteractionResponder) throw forbidden("A run cannot combine completion review and interaction response authority.");
+  }
 
   definitions(): Array<Record<string, unknown>> {
+    if (this.binding.pendingInteractionResponder) {
+      return [
+        ...CAPABILITY_SEMANTIC_TOOL_CATALOG.filter(tool => NATIVE_REVIEW_READ_TOOLS.has(tool.operationId))
+          .map(tool => ({ name: tool.operationId, description: tool.description, inputSchema: tool.inputSchema })),
+        { name: "resolve_interaction", description: "Answer only the pending interaction assigned to this run. This grants no task ownership or delivery authority.",
+          inputSchema: { type: "object", additionalProperties: false,
+            properties: { decision: { type: "string", enum: ["accept", "reject", "answer"] },
+              reason: { type: "string" }, answers: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
+                properties: { questionId: { type: "string" }, optionIds: { type: "array", items: { type: "string" } },
+                  otherText: { type: ["string", "null"] } }, required: ["questionId", "optionIds"] } } }, required: ["decision"] } },
+      ];
+    }
     if (this.binding.nativeReview) {
       // Scope Paperclip control-plane actions. Provider file and shell access
       // still follow the configured agent/environment policy, including tests.
@@ -273,6 +290,10 @@ export class PaperclipRunnerToolAuthority {
     callId: string;
     arguments: unknown;
   }): Promise<unknown> {
+    if (this.binding.pendingInteractionResponder) {
+      if (call.tool === "resolve_interaction") return this.#resolveAssignedInteraction(call.arguments);
+      if (!NATIVE_REVIEW_READ_TOOLS.has(call.tool)) throw forbidden("This response run may only inspect the task and answer its assigned interaction.");
+    }
     if (this.binding.nativeReview) {
       if (call.tool === "resolve_review") return this.#resolveReview(call.arguments);
       if (!NATIVE_REVIEW_READ_TOOLS.has(call.tool)) {
@@ -464,6 +485,15 @@ export class PaperclipRunnerToolAuthority {
         return { ...response, apiOperationId: operationId };
       }
       case "get_task_context": {
+        if (this.binding.pendingInteractionResponder) {
+          const [assignedInteraction] = await this.db.select().from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.id, this.binding.pendingInteractionResponder.interactionId),
+            eq(issueThreadInteractions.companyId, this.binding.companyId),
+            eq(issueThreadInteractions.issueId, this.binding.issueId)));
+          return { company: { id: this.binding.companyId }, actor: redactedActor(context.actor),
+            activeTask: redactedTask(context.issue), assignedInteraction,
+            run: { id: this.binding.runId, status: context.run.status, invocationSource: context.run.invocationSource } };
+        }
         const childTasks = await this.db.select().from(issues)
           .where(and(
             eq(issues.companyId, this.binding.companyId),
@@ -781,7 +811,7 @@ export class PaperclipRunnerToolAuthority {
         eq(heartbeatRuns.agentId, this.binding.agentId),
         eq(heartbeatRuns.nativeIssueId, this.binding.issueId),
         eq(issues.companyId, this.binding.companyId),
-        ...(this.binding.nativeReview ? [] : [
+        ...((this.binding.nativeReview || this.binding.pendingInteractionResponder) ? [] : [
           eq(issues.assigneeAgentId, this.binding.agentId),
           eq(issues.executionRunId, this.binding.runId),
         ]),
@@ -795,6 +825,17 @@ export class PaperclipRunnerToolAuthority {
       || ["paused", "terminated", "pending_approval", "error"].includes(row.actor.status)
     ) {
       throw new Error("paperclip_runner_tool_binding_not_authorized");
+    }
+    if (this.binding.pendingInteractionResponder) {
+      const [company] = await this.db.select().from(companies).where(eq(companies.id, this.binding.companyId));
+      if (company?.status !== "active" || (company.budgetMonthlyCents > 0 && company.spentMonthlyCents >= company.budgetMonthlyCents)
+        || (row.actor.budgetMonthlyCents > 0 && row.actor.spentMonthlyCents >= row.actor.budgetMonthlyCents)) throw forbidden("Company or budget authority unavailable");
+      const current = await readPendingInteractionResponder(this.db, {
+        ...this.binding, contextSnapshot: row.run.contextSnapshot,
+        responsibleUserId: row.run.responsibleUserId, allowResolvedByRunId: this.binding.runId,
+      });
+      if (!current || current.interactionId !== this.binding.pendingInteractionResponder.interactionId)
+        throw forbidden("The pending interaction is no longer assigned to this run.");
     }
     if (this.binding.nativeReview) {
       const admitted = readNativeReviewAssignmentContext(row.run.contextSnapshot);
@@ -811,6 +852,38 @@ export class PaperclipRunnerToolAuthority {
       }
     }
     return row;
+  }
+
+  async #resolveAssignedInteraction(value: unknown) {
+    const input = record(value);
+    if (Object.keys(input).some(key => !["decision", "reason", "answers"].includes(key)))
+      throw badRequest("Respond only to the interaction bound to this run; target overrides are not allowed.");
+    const context = await this.#boundContext();
+    const id = this.binding.pendingInteractionResponder!.interactionId;
+    const [card] = await this.db.select().from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.id, id), eq(issueThreadInteractions.companyId, this.binding.companyId),
+      eq(issueThreadInteractions.issueId, this.binding.issueId)));
+    if (!card) throw forbidden("The assigned interaction is unavailable.");
+    if ((card.kind === "request_confirmation" && !["accept", "reject"].includes(String(input.decision))) ||
+        (card.kind === "ask_user_questions" && input.decision !== "answer") ||
+        !["request_confirmation", "ask_user_questions"].includes(card.kind))
+      throw badRequest("Choose the appropriate response for this assigned confirmation or question.");
+    if (card.status !== "pending") throw forbidden("This interaction has already been answered; only inspection and finishing remain available.");
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    if (input.decision === "reject" && !reason) throw badRequest("Explain the requested changes.");
+    const apiUrl = this.binding.apiUrl ?? process.env.PAPERCLIP_API_URL;
+    const token = createLocalAgentJwt(this.binding.agentId, this.binding.companyId,
+      context.actor.adapterType, this.binding.runId, context.run.responsibleUserId);
+    if (!apiUrl || !token) throw new Error("Interaction response authentication is unavailable");
+    const endpoint = input.decision === "answer" ? "respond" : input.decision;
+    const apiOrigin = apiUrl.replace(/\/+$/, "").replace(/\/api$/, "");
+    const response = await fetch(`${apiOrigin}/api/issues/${this.binding.issueId}/interactions/${id}/${endpoint}`, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Paperclip-Run-Id": this.binding.runId },
+      body: JSON.stringify(input.decision === "answer" ? { answers: input.answers } : input.decision === "reject" ? { reason } : {}),
+    });
+    if (!response.ok) throw new Error(`Interaction response was not accepted (${response.status}): ${(await response.text()).slice(0, 2_000)}`);
+    return { interactionId: id, status: input.decision === "answer" ? "answered" : input.decision === "accept" ? "accepted" : "rejected" };
   }
 
   async #resolveReview(value: unknown) {

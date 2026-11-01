@@ -62,13 +62,15 @@ export function decidePaperclipSemanticAuthorization(
   if (context.actor.status !== "active") {
     return deny("actor_inactive", "The run actor is not active.");
   }
-  if (context.activeTask.assigneeActorId !== context.actor.id) {
+  const responderRead = Boolean(context.interactionResponder?.interactionId) && descriptor.effect === "read" &&
+    ["get_task_context", "get_task_history", "list_documents", "read_document", "list_document_revisions"].includes(descriptor.operationId);
+  if (!responderRead && context.activeTask.assigneeActorId !== context.actor.id) {
     return deny(
       "task_ownership_denied",
       "The run actor no longer owns the active task.",
     );
   }
-  if (context.activeTask.executionRunId !== context.runId) {
+  if (!responderRead && context.activeTask.executionRunId !== context.runId) {
     return deny(
       "task_ownership_denied",
       "The active task is no longer bound to this run.",

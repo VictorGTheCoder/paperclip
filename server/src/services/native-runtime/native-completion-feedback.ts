@@ -6,6 +6,7 @@ import { isConversation } from "../agent-conversations.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { resolveExternalChatResponseWaitAuthorization } from "./chat-attachment-reuse.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-review-participant.js";
+import { pendingInteractionId, readPendingInteractionResponder } from "../pending-interaction-responder.js";
 import { and, eq, inArray, notInArray } from "drizzle-orm";
 import {
   approvals,
@@ -73,6 +74,24 @@ export async function nativeCompletionFeedback(
     )
     .then((rows) => rows[0]);
   if (!issue) throw new Error("Completion task no longer exists.");
+  if (pendingInteractionId(run.contextSnapshot)) {
+    if (result.continuation?.kind === "monitor")
+      throw new Error("An interaction responder cannot schedule the author's task monitor.");
+    const responder = await readPendingInteractionResponder(db, {
+      companyId: run.companyId, issueId: issue.id, agentId: run.agentId,
+      runId: run.id, responsibleUserId: run.responsibleUserId,
+      contextSnapshot: run.contextSnapshot, allowResolvedByRunId: run.id,
+    });
+    const card = responder ? await db.select({ status: issueThreadInteractions.status })
+      .from(issueThreadInteractions).where(and(eq(issueThreadInteractions.id, responder.interactionId),
+        eq(issueThreadInteractions.companyId, run.companyId), eq(issueThreadInteractions.issueId, issue.id)))
+      .then(rows => rows[0]) : null;
+    if (card?.status === "pending" && result.reportedWorkDisposition !== "blocked")
+      throw new Error("Respond to the addressed interaction with resolve_interaction before finishing, or report the concrete response blocker. Do not complete the author's task.");
+    return card?.status === "pending"
+      ? "The response remains pending; the author's task and ownership will be preserved."
+      : "The response run is finished. Its report cannot change the author's task disposition.";
+  }
   const reviewContext = readNativeReviewAssignmentContext(run.contextSnapshot);
   if (reviewContext) {
     const review = await getNativeReviewAssignment(db, {

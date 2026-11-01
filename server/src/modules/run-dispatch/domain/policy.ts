@@ -52,6 +52,7 @@ export type ScheduledRetryGateErrorCode =
   | "agent_not_invokable"
   | "heartbeat_wake_on_demand_disabled"
   | "budget_blocked"
+  | "interaction_response_not_current"
   | "issue_not_found"
   | "issue_reassigned"
   | "issue_cancelled"
@@ -97,6 +98,10 @@ export type ScheduledRetryFacts = {
   issueCheckoutRunId?: string | null;
 
   isNonAssigneeWorkspaceBusyRetry: boolean;
+  /** Current persisted named-card authority, supplied only by the database adapter. */
+  isPendingInteractionResponder?: boolean;
+  /** A named-card intent was requested; this hint never grants authority. */
+  pendingInteractionResponderRequested?: boolean;
   reviewParticipant: ReviewParticipantFacts;
   activePauseHold: PauseHoldFacts | null;
   dependenciesBlocked: DependencyBlockFacts | null;
@@ -110,6 +115,7 @@ export type ScheduledRetryFacts = {
 export type QueuedRunStalenessErrorCode =
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
+  | "interaction_response_not_current"
   | "issue_not_found"
   | "issue_assignee_changed"
   | "issue_terminal_status"
@@ -148,6 +154,10 @@ export type QueuedRunFacts = {
   isInteractionWake: boolean;
   isAuthorizedSourceScopedRecovery: boolean;
   isNonAssigneeWorkspaceBusyRetry: boolean;
+  /** Current persisted named-card authority, supplied only by the database adapter. */
+  isPendingInteractionResponder?: boolean;
+  /** A named-card intent was requested; this hint never grants authority. */
+  pendingInteractionResponderRequested?: boolean;
 
   resumeIntent: boolean;
   wakeCommentIdPresent: boolean;
@@ -169,6 +179,8 @@ type OwnershipFacts = {
   runAgentId: string;
   issueAssigneeAgentId: string | null;
   isNonAssigneeWorkspaceBusyRetry: boolean;
+  /** Current persisted named-card authority, supplied only by the database adapter. */
+  isPendingInteractionResponder?: boolean;
   isInteractionWake?: boolean;
   isCurrentReviewParticipant?: boolean;
   isAuthorizedSourceScopedRecovery?: boolean;
@@ -184,7 +196,7 @@ type OwnershipOutcome = "current_owner" | "reassigned";
 function decideIssueOwnership(facts: OwnershipFacts): OwnershipOutcome {
   if (facts.issueAssigneeAgentId === facts.runAgentId) return "current_owner";
   if (facts.isNonAssigneeWorkspaceBusyRetry) return "current_owner";
-  if (facts.isInteractionWake) return "current_owner";
+  if (facts.isInteractionWake || facts.isPendingInteractionResponder) return "current_owner";
   if (facts.isCurrentReviewParticipant) return "current_owner";
   if (facts.isAuthorizedSourceScopedRecovery) return "current_owner";
   return "reassigned";
@@ -312,6 +324,12 @@ export function decideScheduledRetryGate(
     };
   }
 
+  if (facts.pendingInteractionResponderRequested && !facts.isPendingInteractionResponder) {
+    return { allowed: false, errorCode: "interaction_response_not_current", issueId: facts.issueId,
+      reason: "Scheduled response suppressed because its named interaction is no longer current or authorized",
+      details: { issueId: facts.issueId } };
+  }
+
   if (facts.retryReasonKind === "disposition_repair" && facts.dispositionRepair) {
     const repair = facts.dispositionRepair;
     const superseded =
@@ -341,8 +359,9 @@ export function decideScheduledRetryGate(
     runAgentId: facts.runAgentId,
     issueAssigneeAgentId: facts.issueAssigneeAgentId,
     isNonAssigneeWorkspaceBusyRetry: facts.isNonAssigneeWorkspaceBusyRetry,
+    isPendingInteractionResponder: facts.isPendingInteractionResponder,
     isCurrentReviewParticipant:
-      facts.reviewParticipant.isInReview &&
+      !facts.isPendingInteractionResponder && facts.reviewParticipant.isInReview &&
       facts.reviewParticipant.hasParticipant &&
       facts.reviewParticipant.participantIsAgent &&
       facts.reviewParticipant.participantAgentId === facts.runAgentId,
@@ -361,20 +380,20 @@ export function decideScheduledRetryGate(
     };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.issueStatus === "blocked") {
+  if (facts.retryReasonKind === "native_safe_replacement" && facts.issueStatus === "blocked" && !facts.isPendingInteractionResponder) {
     return { allowed: false, issueId: facts.issueId, errorCode: "issue_blocked",
       reason: "Scheduled replacement suppressed because the task was blocked after recovery",
       details: { issueId: facts.issueId } };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" &&
+  if (facts.retryReasonKind === "native_safe_replacement" && !facts.isPendingInteractionResponder &&
       [facts.issueExecutionRunId, facts.issueCheckoutRunId].some(id => id != null && id !== facts.runId)) {
     return { allowed: false, issueId: facts.issueId, errorCode: "issue_execution_lock_changed",
       reason: "Scheduled replacement suppressed because another run owns task execution or checkout",
       details: { issueId: facts.issueId, currentExecutionRunId: facts.issueExecutionRunId, currentCheckoutRunId: facts.issueCheckoutRunId ?? null } };
   }
 
-  const requiresInProgress = facts.retryReasonKind === "max_turn_continuation";
+  const requiresInProgress = facts.retryReasonKind === "max_turn_continuation" && !facts.isPendingInteractionResponder;
   const statusOutcome = decideIssueStatus({
     status: facts.issueStatus,
     requiresInProgress,
@@ -408,7 +427,7 @@ export function decideScheduledRetryGate(
   const lockOutcome = decideExecutionLock({
     requiresExecutionLock:
       (requiresInProgress ||
-        (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry)) &&
+        (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry && !facts.isPendingInteractionResponder)) &&
       facts.enforceIssueExecutionLock,
     runId: facts.runId,
     issueExecutionRunId: facts.issueExecutionRunId,
@@ -431,6 +450,7 @@ export function decideScheduledRetryGate(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
+    bypass: facts.isPendingInteractionResponder,
   });
   if (participantOutcome === "participant_changed") {
     return {
@@ -462,7 +482,7 @@ export function decideScheduledRetryGate(
     };
   }
 
-  if (facts.dependenciesBlocked) {
+  if (facts.dependenciesBlocked && !facts.isPendingInteractionResponder) {
     return {
       allowed: false,
       reason: "Scheduled retry suppressed because issue dependencies are still blocked",
@@ -476,7 +496,7 @@ export function decideScheduledRetryGate(
     };
   }
 
-  if (facts.pendingResponse) {
+  if (facts.pendingResponse && !facts.isPendingInteractionResponder) {
     return {
       allowed: false,
       reason: "Conversation retry is waiting for a response to a pending question or approval",
@@ -505,6 +525,12 @@ export function decideQueuedRunStaleness(
       reason: "Cancelled because the target issue no longer exists",
       details: { issueId: facts.issueId },
     };
+  }
+
+  if (facts.pendingInteractionResponderRequested && !facts.isPendingInteractionResponder) {
+    return { stale: true, errorCode: "interaction_response_not_current",
+      reason: "Cancelled because the named interaction is no longer current or authorized",
+      details: { issueId: facts.issueId } };
   }
 
   if (facts.isResolvedInteractionContinuation || facts.isConnectionContinuation) {
@@ -565,9 +591,10 @@ export function decideQueuedRunStaleness(
     runAgentId: facts.runAgentId,
     issueAssigneeAgentId: facts.issueAssigneeAgentId,
     isNonAssigneeWorkspaceBusyRetry: facts.isNonAssigneeWorkspaceBusyRetry,
+    isPendingInteractionResponder: facts.isPendingInteractionResponder,
     isInteractionWake: facts.isInteractionWake,
     isCurrentReviewParticipant:
-      facts.reviewParticipant.isInReview &&
+      !facts.isPendingInteractionResponder && facts.reviewParticipant.isInReview &&
       facts.reviewParticipant.participantIsAgent &&
       facts.reviewParticipant.participantAgentId === facts.runAgentId,
     isAuthorizedSourceScopedRecovery: facts.isAuthorizedSourceScopedRecovery,
@@ -586,7 +613,7 @@ export function decideQueuedRunStaleness(
     };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.dependenciesBlocked) {
+  if (facts.retryReasonKind === "native_safe_replacement" && facts.dependenciesBlocked && !facts.isPendingInteractionResponder) {
     return { stale: true, errorCode: "issue_dependencies_blocked",
       reason: "Cancelled because issue dependencies became blocked before replacement dispatch",
       details: { issueId: facts.issueId,
@@ -594,20 +621,20 @@ export function decideQueuedRunStaleness(
         unresolvedBlockerCount: facts.dependenciesBlocked.unresolvedBlockerCount } };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.issueStatus === "blocked") {
+  if (facts.retryReasonKind === "native_safe_replacement" && facts.issueStatus === "blocked" && !facts.isPendingInteractionResponder) {
     return { stale: true, errorCode: "issue_blocked",
       reason: "Cancelled because the task was blocked before replacement dispatch",
       details: { issueId: facts.issueId } };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" &&
+  if (facts.retryReasonKind === "native_safe_replacement" && !facts.isPendingInteractionResponder &&
       [facts.issueExecutionRunId, facts.issueCheckoutRunId].some(id => id != null && id !== facts.runId)) {
     return { stale: true, errorCode: "issue_execution_lock_changed",
       reason: "Cancelled because another run owns task execution or checkout before replacement dispatch",
       details: { issueId: facts.issueId, currentExecutionRunId: facts.issueExecutionRunId, currentCheckoutRunId: facts.issueCheckoutRunId ?? null } };
   }
 
-  const requiresInProgress = facts.retryReasonKind === "max_turn_continuation";
+  const requiresInProgress = facts.retryReasonKind === "max_turn_continuation" && !facts.isPendingInteractionResponder;
   const statusOutcome = decideIssueStatus({
     status: facts.issueStatus,
     requiresInProgress,
@@ -640,7 +667,7 @@ export function decideQueuedRunStaleness(
   const lockOutcome = decideExecutionLock({
     // A server-recorded non-assignee wake never held the task execution lock.
     requiresExecutionLock: requiresInProgress ||
-      (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry),
+      (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry && !facts.isPendingInteractionResponder),
     runId: facts.runId,
     issueExecutionRunId: facts.issueExecutionRunId,
   });
@@ -661,7 +688,7 @@ export function decideQueuedRunStaleness(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
-    bypass: facts.wakeCommentIdPresent,
+    bypass: facts.wakeCommentIdPresent || facts.isPendingInteractionResponder,
   });
   if (participantOutcome === "participant_changed") {
     return {

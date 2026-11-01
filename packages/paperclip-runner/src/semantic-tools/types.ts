@@ -206,6 +206,8 @@ export type CapabilitySemanticToolResult =
   | CapabilitySemanticToolDenial;
 
 export interface PaperclipSemanticRunContext {
+  /** Server-verified same-task read scope for an independently addressed responder. */
+  readonly interactionResponder?: { readonly interactionId: string };
   readonly runId: string;
   readonly companyId: string;
   readonly actor: {

@@ -47,7 +47,7 @@ import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversati
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispatch.js";
-import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
+import { buildNativeReviewRequest, buildNativeInteractionResponderRequest } from "./native-runtime/native-review-prompt.js";
 import {
   legacyExecutionNeedsReconciliationWithEvidence,
   settleInterruptedNativeBootstrap,
@@ -551,6 +551,7 @@ import {
   allowsIssueInteractionWake,
   isResolvedInteractionContinuationWakeContext,
 } from "../modules/run-dispatch/index.js";
+import { pendingInteractionId, readPendingInteractionResponder } from "./pending-interaction-responder.js";
 import {
   createWakeQueue,
   WakeQueueApplicationError,
@@ -3761,7 +3762,7 @@ function normalizeMaxConcurrentRuns(value: unknown) {
   );
 }
 
-interface WakeupOptions {
+export interface WakeupOptions {
   /** Set only by authenticated board wake routes; never copied from caller payloads. */
   manualUserWake?: boolean;
   /** Internal resume of a queue with persisted board interruption intent. */
@@ -8690,6 +8691,7 @@ export function buildPaperclipTaskMarkdown(input: {
     kind?: string | null;
     status?: string | null;
   } | null;
+  interactionResponder?: { interactionId: string } | null;
   planReview?: {
     status?: string | null;
     reason?: string | null;
@@ -8830,6 +8832,11 @@ export function buildPaperclipTaskMarkdown(input: {
     }
   };
   if (issue) {
+    if (input.interactionResponder) {
+      lines.push("", "Current run: addressed interaction response",
+        `Respond to the existing native interaction ${quoteTaskScalar(input.interactionResponder.interactionId)} on this issue. Read the saved questions or exact document revision, then submit your own authorized response through the interaction API.`,
+        "The task remains assigned to its author. Do not check out, reassign, complete, or implement the author's task, change its dependencies, or treat this review as permission for a separate governed action. After recording the response, end this bounded run; Paperclip owns the author's continuation.");
+    }
     lines.push(
       `- Issue: ${quoteTaskScalar(issue.identifier || issue.id)}`,
       `- Title: ${quoteTaskScalar(issue.title)}`,
@@ -17513,6 +17520,11 @@ export function heartbeatService(
         return null;
       }
 
+      const interactionResponder = await readPendingInteractionResponder(db, {
+        companyId: run.companyId, issueId, agentId: run.agentId,
+        runId: run.id, responsibleUserId: run.responsibleUserId, contextSnapshot: context,
+      });
+      if (interactionResponder) context.interactionResponder = interactionResponder;
       const dependencyReadiness = await issuesSvc.listDependencyReadiness(
         run.companyId,
         [issueId],
@@ -17521,6 +17533,7 @@ export function heartbeatService(
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
       if (
         unresolvedBlockerCount > 0 &&
+        !interactionResponder &&
         !allowsIssueInteractionWake(
           context,
           ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
@@ -17576,13 +17589,20 @@ export function heartbeatService(
       }).from(issues).where(and(
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
       )).for("update") : [];
-      const ownsIssue = owner?.assigneeAgentId === run.agentId &&
+      // A respondent participates without taking the author's task locks.
+      const responderRequested = pendingInteractionId(context);
+      const responder = issueId && responderRequested ? await readPendingInteractionResponder(tx, {
+        companyId: run.companyId, issueId, agentId: run.agentId, runId: run.id,
+        responsibleUserId, contextSnapshot: context, lockForUpdate: true,
+      }) : null;
+      const ownsIssue = owner?.assigneeAgentId === run.agentId && !responder &&
         context.wakeReason !== "source_scoped_recovery_action";
+      if (responderRequested && !responder) return { ownsIssue: false, blocked: true };
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
           owner.checkoutRunId && owner.checkoutRunId !== run.id) {
         return { ownsIssue, blocked: true };
       }
-      if (run.scheduledRetryReason === "native_provider_overloaded" && owner?.executionRunId &&
+      if (!responder && run.scheduledRetryReason === "native_provider_overloaded" && owner?.executionRunId &&
           owner.executionRunId !== run.id && owner.executionRunId !== run.retryOfRunId) {
         return { ownsIssue, blocked: true };
       }
@@ -18020,6 +18040,7 @@ export function heartbeatService(
     const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
     if (
       !nativeReviewContext && claimedIssueId &&
+      !pendingInteractionId(claimedContext) &&
       claimedWakeReason !== "source_scoped_recovery_action"
     ) {
       const claimedAgent = await getAgent(claimed.agentId);
@@ -20650,6 +20671,23 @@ export function heartbeatService(
       const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
       const sessionCodec = getAdapterSessionCodec(agent.adapterType);
       const issueId = readNonEmptyString(context.issueId);
+      const interactionResponder = issueId ? await readPendingInteractionResponder(db, {
+        companyId: agent.companyId, issueId, agentId: agent.id, runId: run.id,
+        responsibleUserId: run.responsibleUserId, contextSnapshot: context,
+        allowResolvedByRunId: run.id,
+      }) : null;
+      if (pendingInteractionId(context) && !interactionResponder) {
+        const reason = "The pending interaction no longer authorizes this responder";
+        await setRunStatus(run.id, "cancelled", {
+          errorCode: "interaction_response_no_longer_authorized", error: reason,
+          finishedAt: new Date(), resultJson: { ...parseObject(run.resultJson), cancellation: {
+            source: "control_plane", expected: true, initiator: { type: "system" },
+            reason, recordedAt: new Date().toISOString(),
+          } },
+        });
+        return;
+      }
+      if (interactionResponder) context.interactionResponder = interactionResponder;
       let issueContext = issueId
         ? await getIssueExecutionContext(agent.companyId, issueId)
         : null;
@@ -20661,6 +20699,7 @@ export function heartbeatService(
       if (
         issueId &&
         issueContext &&
+        !interactionResponder &&
         isResolvedInteractionContinuationWakeContext(context)
       ) {
         try {
@@ -20693,6 +20732,7 @@ export function heartbeatService(
       if (
         issueId &&
         issueContext &&
+        !interactionResponder &&
         !isResolvedInteractionContinuationWakeContext(context) &&
         shouldAutoCheckoutIssueForWake({
           contextSnapshot: context,
@@ -21229,6 +21269,7 @@ export function heartbeatService(
           ? issueContext.chatCommunicationGuidance
           : null;
       const taskMarkdownInput = {
+        interactionResponder: interactionResponder ? { interactionId: interactionResponder.interactionId } : null,
         conversationConfirmations: issueRef && isConversation(issueContext)
           ? await getConversationConfirmationContext({ db, companyId: agent.companyId, issueId: issueRef.id, agentId: agent.id })
           : null,
@@ -23756,13 +23797,20 @@ export function heartbeatService(
             contextSnapshot: nativeReviewContext,
           }) : null;
           if (nativeReviewContext && !nativeReview) throw new Error("native_review_assignment_no_longer_available");
+          const responderCard = interactionResponder ? await db.select().from(issueThreadInteractions)
+            .where(and(eq(issueThreadInteractions.id, interactionResponder.interactionId),
+              eq(issueThreadInteractions.companyId, agent.companyId), eq(issueThreadInteractions.issueId, issueRef.id)))
+            .then(rows => rows[0]) : null;
           const nativeReviewRequest = nativeReview
             ? buildNativeReviewRequest({
                 title: nativeReview.interaction.title,
                 summary: nativeReview.interaction.summary,
                 payload: nativeReview.interaction.payload,
               })
-            : null;
+            : responderCard ? buildNativeInteractionResponderRequest({
+                interactionId: responderCard.id, title: responderCard.title,
+                summary: responderCard.summary, payload: responderCard.payload,
+              }) : null;
           const persistedContract = run.completionContractId
             ? await db
                 .select()
@@ -27001,6 +27049,9 @@ export function heartbeatService(
       triggerDetail,
       payload,
     });
+    // Different cards are different response contracts, even on one task.
+    // This hint only separates queue entries; dispatch still verifies authority.
+    if (pendingInteractionId(enrichedContextSnapshot)) opts = { ...opts, allowRunCoalescing: false };
     // Keep each request's own server-derived origin, including coalesced wakes.
     // A run's merged context cannot establish which caller authored one receipt.
     // Overwrite caller-supplied nested context rather than trusting it.
@@ -27981,6 +28032,13 @@ export function heartbeatService(
           }))) return deferBlockedExecution(executionBlocker);
 
           const issueStateGuard = opts.issueStateGuard;
+          const interactionResponder = await readPendingInteractionResponder(tx as unknown as Db, {
+            companyId: agent.companyId, issueId: issue.id, agentId,
+            responsibleUserId: await resolveQueuedResponsibleUserId(),
+            contextSnapshot: enrichedContextSnapshot,
+            forAdmission: true,
+          });
+          if (interactionResponder) enrichedContextSnapshot.interactionResponder = interactionResponder;
           if (
             issueStateGuard &&
             (!issueStateGuard.statuses.includes(issue.status) ||
@@ -28258,6 +28316,10 @@ export function heartbeatService(
                     ...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
                   ]),
                   sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                  // A bounded respondent never held source execution. The
+                  // legacy lock backfill must not turn it into its author's
+                  // executor when the saved answer wakes that same agent.
+                  sql`${heartbeatRuns.contextSnapshot} #>> '{interactionResponder,purpose}' IS DISTINCT FROM 'interaction_responder'`,
                 ),
               )
               .orderBy(
@@ -28302,10 +28364,10 @@ export function heartbeatService(
           const blockedInteractionWake =
             dependencyReadiness &&
             !dependencyReadiness.isDependencyReady &&
-            allowsIssueInteractionWake(
+            (interactionResponder || allowsIssueInteractionWake(
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-            );
+            ));
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;
@@ -28968,16 +29030,19 @@ export function heartbeatService(
 
     const sameScopeQueuedRun = activeRuns.find(
       (candidate) =>
+        !pendingInteractionId(candidate.contextSnapshot) &&
         candidate.status === "queued" &&
         isSameTaskScope(runTaskKey(candidate), taskKey),
     );
     const sameScopeScheduledRetryRun = activeRuns.find(
       (candidate) =>
+        !pendingInteractionId(candidate.contextSnapshot) &&
         candidate.status === "scheduled_retry" &&
         isSameTaskScope(runTaskKey(candidate), taskKey),
     );
     const sameScopeRunningRun = activeRuns.find(
       (candidate) =>
+        !pendingInteractionId(candidate.contextSnapshot) &&
         candidate.status === "running" &&
         isSameTaskScope(runTaskKey(candidate), taskKey),
     );
@@ -29283,7 +29348,7 @@ export function heartbeatService(
         readNonEmptyString(wakeContext.issueId) ??
         null;
       const scopeKey = issueId
-        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}`
+        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? pendingInteractionId(wakeContext) ?? ""}`
         : null;
       const priorDelivery = scopeKey
         ? deliveredByIssueScope.get(scopeKey)
@@ -29326,6 +29391,10 @@ export function heartbeatService(
               contextSnapshot: wakeContext,
             })
           : null;
+        const interactionResponder = await readPendingInteractionResponder(db, {
+          companyId: candidate.companyId, issueId, agentId: candidate.agentId,
+          contextSnapshot: wakeContext, forAdmission: true,
+        });
         const onboardingResultReport = targetIssue?.status === "done" && await isCompletedOnboardingHandoffWake(db, {
           companyId: candidate.companyId, issueId, agentId: candidate.agentId,
           reason: candidate.reason, contextSnapshot: wakeContext,
@@ -29334,7 +29403,7 @@ export function heartbeatService(
         if (
           !targetIssue ||
           (["done", "cancelled"].includes(targetIssue.status) && !onboardingResultReport) ||
-          (targetIssue.assigneeAgentId !== candidate.agentId && !nativeReview) ||
+          (targetIssue.assigneeAgentId !== candidate.agentId && !nativeReview && !interactionResponder) ||
           (candidate.reason === "native_completion_review" && !nativeReview)
         ) {
           await db

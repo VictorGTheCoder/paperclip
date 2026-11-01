@@ -130,6 +130,7 @@ import { nativeSha256 } from "./canonical.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 import { createAssignedMcpTools, getAssignedMcpGateway } from "./assigned-mcp-tools.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-review-participant.js";
+import { pendingInteractionId, readPendingInteractionResponder } from "../pending-interaction-responder.js";
 import { NativeChatAttachmentReadScope } from "./chat-attachment-read.js";
 import {
   assertCurrentWakeCommentsRead,
@@ -10749,12 +10750,18 @@ async function createRunnerdBackendWithinSessionClaim(
   const pinnedSkills = new Set("runtimeContext" in input.execution ? input.execution.runtimeContext.skills.map((skill) => skill.key) : []);
   const connectorAssignments = [...pinnedSkills].some(isConnectorSkill)
     ? await resolveConnectorAssignments(input.db, input.execution.binding) : [];
-  const reviewRun = await input.db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+  const reviewRun = await input.db.select({ contextSnapshot: heartbeatRuns.contextSnapshot, responsibleUserId: heartbeatRuns.responsibleUserId })
     .from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, input.execution.binding.runId),
       eq(heartbeatRuns.companyId, input.execution.binding.companyId),
     )).limit(1).then((rows) => rows[0]);
   const nativeReview = readNativeReviewAssignmentContext(reviewRun?.contextSnapshot);
+  const interactionResponder = await readPendingInteractionResponder(input.db, {
+    ...input.execution.binding, responsibleUserId: reviewRun?.responsibleUserId,
+    contextSnapshot: reviewRun?.contextSnapshot, allowResolvedByRunId: input.execution.binding.runId,
+  });
+  if (pendingInteractionId(reviewRun?.contextSnapshot) && !interactionResponder)
+    throw new Error("interaction_response_no_longer_authorized");
   if (nativeReview && !await getNativeReviewAssignment(input.db, {
     ...input.execution.binding, contextSnapshot: nativeReview,
   })) throw new Error("native_review_assignment_no_longer_available");
@@ -10775,7 +10782,7 @@ async function createRunnerdBackendWithinSessionClaim(
   if (relayAssignedMcp && hasAssignedMcp && !assignedGatewayPublicId) {
     throw new Error("assigned native MCP gateway path is invalid");
   }
-  const assignedMcpTools = relayAssignedMcp && !nativeReview && assignedMcpUrl && assignedMcpToken
+  const assignedMcpTools = relayAssignedMcp && !nativeReview && !interactionResponder && assignedMcpUrl && assignedMcpToken
     ? await createAssignedMcpTools({
         gateway: getAssignedMcpGateway(input.db),
         gatewayPublicId: assignedGatewayPublicId!,
@@ -10785,7 +10792,8 @@ async function createRunnerdBackendWithinSessionClaim(
     : undefined;
   const authority = new PaperclipRunnerToolAuthority(input.db, {
     ...(nativeReview ? { nativeReview } : {}),
-    connectorAssignments: connectorAssignments.filter((assignment) => pinnedSkills.has(assignment.skillKey)),
+    ...(interactionResponder ? { pendingInteractionResponder: interactionResponder } : {}),
+    connectorAssignments: interactionResponder ? [] : connectorAssignments.filter((assignment) => pinnedSkills.has(assignment.skillKey)),
     assignedMcpTools,
     companyId: input.execution.binding.companyId,
     issueId: input.execution.binding.issueId,

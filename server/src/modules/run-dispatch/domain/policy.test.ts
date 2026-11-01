@@ -528,3 +528,40 @@ describe("AI subscription wait ownership", () => {
       .toMatchObject({ stale: true, errorCode: "issue_execution_lock_changed" });
   });
 });
+
+describe("verified pending-card responders", () => {
+  it("may answer on another owner's dependency-blocked issue without owning its execution lock", () => {
+    const responder = { isPendingInteractionResponder: true, issueAssigneeAgentId: "author",
+      issueExecutionRunId: "author-run", retryReasonKind: "ai_connection_wait" as const };
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), ...responder,
+      enforceIssueExecutionLock: true, dependenciesBlocked: { unresolvedBlockerIssueIds: ["child"], unresolvedBlockerCount: 1 } }, NOW))
+      .toEqual({ allowed: true });
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), ...responder }, NOW)).toEqual({ stale: false });
+  });
+  it("retains pause and budget gates, and loses the exception when persisted authority is gone", () => {
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), isPendingInteractionResponder: true,
+      activePauseHold: { holdId: "hold", rootIssueId: "root" } }, NOW)).toMatchObject({ allowed: false, errorCode: "issue_paused" });
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), isPendingInteractionResponder: true,
+      budgetBlock: { reason: "limit", scopeType: "agent", scopeId: "agent-1" } }, NOW)).toMatchObject({ allowed: false });
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), isPendingInteractionResponder: false,
+      issueAssigneeAgentId: "author" }, NOW)).toMatchObject({ stale: true, errorCode: "issue_assignee_changed" });
+  });
+});
+
+
+describe("stale named response intents never fall back to task ownership", () => {
+  it.each(["agent-1", "author"])("cancels a stale card even when the issue assignee is %s", assignee => {
+    const intent = { pendingInteractionResponderRequested: true, isPendingInteractionResponder: false,
+      issueAssigneeAgentId: assignee };
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), ...intent }, NOW))
+      .toMatchObject({ stale: true, errorCode: "interaction_response_not_current" });
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), ...intent }, NOW))
+      .toMatchObject({ allowed: false, errorCode: "interaction_response_not_current" });
+  });
+  it("keeps ordinary owner execution and current same-owner response intents eligible", () => {
+    expect(decideQueuedRunStaleness(baseStalenessFacts(), NOW)).toEqual({ stale: false });
+    const current = { pendingInteractionResponderRequested: true, isPendingInteractionResponder: true };
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), ...current }, NOW)).toEqual({ stale: false });
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), ...current }, NOW)).toEqual({ allowed: true });
+  });
+});

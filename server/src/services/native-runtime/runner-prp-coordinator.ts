@@ -24,6 +24,7 @@ import {
   registerNativeQuestionCommandTarget,
 } from "./native-question-bridge.js";
 import { PaperclipRunnerSemanticAuthority } from "./runner-semantic-authority.js";
+import { pendingInteractionId, readPendingInteractionResponder } from "../pending-interaction-responder.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -205,6 +206,11 @@ export function runnerPrpCoordinator(
           ),
         )
         .limit(1);
+      const interactionResponder = binding ? await readPendingInteractionResponder(db, {
+        companyId: input.companyId, issueId: input.issueId, agentId: input.agentId,
+        runId: input.runId, responsibleUserId: binding.run.responsibleUserId,
+        contextSnapshot: binding.run.contextSnapshot, allowResolvedByRunId: input.runId,
+      }) : null;
       if (
         !binding ||
         !["queued", "running"].includes(binding.run.status) ||
@@ -213,8 +219,9 @@ export function runnerPrpCoordinator(
         !binding.run.completionContractSha256 ||
         binding.completionContract.canonicalSha256 !==
           binding.run.completionContractSha256 ||
-        binding.issue.assigneeAgentId !== input.agentId ||
-        binding.issue.executionRunId !== input.runId ||
+        (!interactionResponder && (binding.issue.assigneeAgentId !== input.agentId ||
+          binding.issue.executionRunId !== input.runId)) ||
+        (pendingInteractionId(binding.run.contextSnapshot) && !interactionResponder) ||
         ["paused", "terminated", "pending_approval", "error"].includes(
           binding.agent.status,
         )
@@ -231,6 +238,7 @@ export function runnerPrpCoordinator(
         issueId: input.issueId,
         runId: input.runId,
         agentId: input.agentId,
+        ...(interactionResponder ? { pendingInteractionResponder: interactionResponder } : {}),
       });
       const semanticTools = await semanticAuthority.listAlwaysAvailableTools();
       const storeBinding = {

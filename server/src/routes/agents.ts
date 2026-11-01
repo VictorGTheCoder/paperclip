@@ -1,3 +1,4 @@
+import { readPendingInteractionResponder } from "../services/pending-interaction-responder.js";
 import { aiConnectionRouterService, poolMemberRuntimeConfig } from "../services/ai-connection-router.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { completeConnectionIntentSchema } from "@paperclipai/shared";
@@ -6118,6 +6119,32 @@ export function agentRoutes(
     }
 
     let wakePayload = req.body.payload ?? null;
+    let wakeIdempotencyKey = req.body.idempotencyKey ?? null;
+    let requestedInteractionContext: Record<string, unknown> = {};
+    if (req.body.reason === "interaction_response_requested") {
+      assertBoard(req);
+      if ((opts.source ?? "on_demand") !== "on_demand" || req.body.failedRunId || req.body.debug ||
+          req.body.forceFreshSession === true || typeof req.body.idempotencyKey !== "string" || !req.body.idempotencyKey.trim())
+        throw badRequest("An interaction response request requires a fresh on-demand intent and a stable idempotency key.");
+      const issueId = asNonEmptyString(wakePayload?.issueId);
+      const interactionId = asNonEmptyString(wakePayload?.interactionId);
+      if (!issueId || !interactionId || !isUuidLike(issueId) || !isUuidLike(interactionId))
+        throw badRequest("Select the existing task and pending interaction.");
+      const issue = await issueService(db).getById(issueId);
+      if (!issue || issue.companyId !== agent.companyId) throw notFound("Task not found");
+      const operatorAccess = await access.decide({ actor: req.actor, action: "issue:read",
+        resource: { type: "issue", companyId: issue.companyId, issueId: issue.id, projectId: issue.projectId } });
+      if (!operatorAccess.allowed) throw forbidden(operatorAccess.explanation, authorizationDeniedDetails(operatorAccess));
+      const hint = { issueId, interactionId, wakeReason: "interaction_response_requested", source: "agent.wakeup.interaction_requested" };
+      const responder = await readPendingInteractionResponder(db, { companyId: agent.companyId, issueId,
+        agentId: agent.id, responsibleUserId: req.actor.userId ?? null, contextSnapshot: hint, forAdmission: true });
+      if (!responder) throw conflict("This agent cannot answer the current pending interaction.");
+      // Ignore all caller context/purpose markers; preserve the old cancelled
+      // receipt and admit this independently authorized, idempotent intent.
+      wakePayload = { issueId, interactionId };
+      wakeIdempotencyKey = req.body.idempotencyKey.trim();
+      requestedInteractionContext = { ...hint, interactionResponder: responder };
+    }
     let retryConversationContext: Record<string, unknown> = {};
     let retryNativeReviewContext: NativeReviewAssignmentContext | null = null;
     if (req.body.failedRunId) {
@@ -6290,10 +6317,11 @@ export function agentRoutes(
       payload: req.actor.type === "agent" && wakePayload
         ? { ...wakePayload, commentId: undefined, wakeCommentId: undefined, wakeCommentIds: undefined }
         : wakePayload,
-      idempotencyKey: req.body.idempotencyKey ?? null,
+      idempotencyKey: wakeIdempotencyKey,
       requestedByActorType: req.actor.type === "agent" ? "agent" : "user",
       requestedByActorId: req.actor.type === "agent" ? req.actor.agentId ?? null : req.actor.userId ?? null,
       contextSnapshot: {
+        ...requestedInteractionContext,
         ...retryConversationContext,
         // Only the selected server-owned run can carry review authority into
         // an exact retry. Dispatch revalidates the current review assignment.

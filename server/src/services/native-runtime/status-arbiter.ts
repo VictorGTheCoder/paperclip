@@ -116,6 +116,8 @@ export function arbitrateNativeStatus(input: {
   reviewOwnerUserId?: string | null;
   /** Review decisions own task state; a reviewer's finish report cannot override them. */
   nativeReviewOutcome?: "resolved" | "pending" | "stale";
+  /** Addressed responders do not own their author's task disposition. */
+  interactionResponderOutcome?: "resolved" | "pending" | "stale";
   /** Re-derived from the committed runner terminal and pinned execution identity. */
   providerModelRejected?: boolean;
   providerOverloaded?: boolean;
@@ -124,6 +126,12 @@ export function arbitrateNativeStatus(input: {
   agentId: string;
   priorIssueStatus: NativeAuthoritativeIssueStatus;
 }): NativeStatusDecision {
+  if (input.interactionResponderOutcome) return {
+    policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+    statusAction: "preserve", toStatus: input.priorIssueStatus,
+    reasonCode: `interaction_responder_${input.interactionResponderOutcome}`,
+    unblockDescriptor: null, effects: [],
+  };
   if (["done", "cancelled"].includes(input.priorIssueStatus)) {
     return {
       policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,

@@ -89,6 +89,7 @@ import {
   workspaceOperationService,
 } from "./services/index.js";
 import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
+import { interactionWakeDeliveryService } from "./services/interaction-wake-delivery.js";
 import { deliverNativeQuestionResponse } from "./services/native-runtime/native-question-bridge.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
@@ -1247,6 +1248,9 @@ async function startServerWithDatabaseTeardown(
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
+  const interactionWakeDeliveries = interactionWakeDeliveryService(db as any, {
+    heartbeat: environmentLeaseCleanupHeartbeat,
+  });
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
       .sweepPendingCleanupLeases({ backoffMs })
@@ -1299,6 +1303,7 @@ async function startServerWithDatabaseTeardown(
 
   await chatCompletionDeliveries.sweepPending().catch((err) => logger.error({ err }, "startup chat completion delivery recovery failed"));
   await connectionDeliveries.sweepPending();
+  await interactionWakeDeliveries.sweepPending().catch(err => logger.error({ err }, "startup interaction wake delivery recovery failed"));
   await app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "startup tool review recovery failed"));
   await app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "startup gateway token cleanup failed"));
   await app.locals.toolActionDeliveries.sweepPending().catch((err: unknown) => logger.error({ err }, "startup tool review delivery sweep failed"));
@@ -1764,6 +1769,7 @@ async function startServerWithDatabaseTeardown(
 
         trackHeartbeatSchedulerWork(chatCompletionDeliveries.sweepPending().catch((err) => logger.error({ err }, "chat completion delivery failed")));
         trackHeartbeatSchedulerWork(connectionDeliveries.sweepPending().catch((err) => logger.error({ err }, "connection continuation delivery failed")));
+        trackHeartbeatSchedulerWork(interactionWakeDeliveries.sweepPending().catch(err => logger.error({ err }, "interaction wake delivery recovery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "gateway token cleanup failed")));
         trackHeartbeatSchedulerWork(app.locals.toolActionDeliveries.sweepPending().catch((err: unknown) => logger.error({ err }, "tool review delivery sweep failed")));

@@ -409,6 +409,27 @@ run/turn ids, payload digest, attempt/acknowledgement state, and one of `steered
 `issue_thread_interactions.result`. Deleting the interaction cascades its receipt,
 while deleting a referenced run clears that run pointer without deleting history.
 
+### Ordinary interaction wake recovery
+
+An ordinary question or confirmation row is also the durable fact behind its
+reviewer wake. Confirmation resolution records the continuation fact in the same
+row. Startup recovery and the bounded delivery sweep reconcile these facts with
+`agent_wakeup_requests`; they do not need a second interaction outbox or a schema
+migration. Company-scoped open-issue and current-target checks precede delivery.
+The existing `interaction:%` uniqueness fence deduplicates concurrent attempts.
+
+Queued, coalesced, run-associated, failed and cancelled wake receipts suppress
+backstop replay; the legacy `interaction-pending:%` key is recognized too.
+Unknown skipped receipts remain suppressed. A known skipped pre-admission
+`executionWait` budget or invokability diagnostic with no run is not a provider
+attempt: current canonical gates must pass before it can produce its first wake,
+using the same database uniqueness fence. No human-only gate changes.
+
+Retrying a historical cancelled or failed run requires a separate authorized
+operator intent through the existing native recovery path. Answered questions
+retain the dedicated question-response outbox; governed tool/secret effects
+retain their own delivery owners.
+
 ## Plugin database namespaces
 
 The plugin runtime tracks plugin-owned database namespaces and migrations in `plugin_database_namespaces` and `plugin_migrations`. Hosted deployments that separate runtime and migration connections should set `DATABASE_MIGRATION_URL`; plugin namespace migration work uses the migration connection when present.
