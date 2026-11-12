@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
+import * as path from "node:path";
 import test from "node:test";
 
 const require = createRequire(new URL("../packages/paperclip-runner/package.json", import.meta.url));
 const source = readFileSync(require.resolve("@agentclientprotocol/codex-acp"), "utf8");
-const helperStart = source.indexOf("function paperclipSandboxPolicy(");
+const helperStart = source.indexOf("function paperclipGitMetadataWritableRoots()");
 const helperEnd = source.indexOf("\nvar CodexAcpClient", helperStart);
 const methodStart = source.indexOf("  async sendPrompt(");
 const methodEnd = source.indexOf("\n  async runAgentFileChangeReport", methodStart);
@@ -17,7 +18,12 @@ async function turnPolicy(policy, env) {
   const context = {
     process: { env },
     buildPromptItems: (prompt) => prompt,
-    addAdditionalDirectoriesToSandboxPolicy: (value) => value,
+    path6: path,
+    uniqueStrings: (values) => [...new Set(values)],
+    addAdditionalDirectoriesToSandboxPolicy: (value, roots) =>
+      roots.length && value.type === "workspaceWrite"
+        ? { ...value, writableRoots: [...new Set([...(value.writableRoots ?? []), ...roots])] }
+        : value,
   };
   const client = runInNewContext(
     source.slice(helperStart, helperEnd) + "\n({" + source.slice(methodStart, methodEnd) + "})",
@@ -60,5 +66,23 @@ test("ACP leaves other sandbox modes and callers without a valid override unchan
   const policy = { type: "workspaceWrite", networkAccess: false };
   for (const value of [undefined, "", "1", "invalid"]) {
     assert.equal((await turnPolicy(policy, { PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: value })).sandboxPolicy, policy);
+  }
+});
+
+test("ACP turn projects only the declared Git metadata into sandbox write roots", async () => {
+  const roots = ["/repo/.git", "/repo/.git/worktrees/issue-276"];
+  const env = {
+    PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1",
+    PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify(roots),
+    PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: "false",
+  };
+  const policy = { type: "workspaceWrite", writableRoots: ["/repo/worktree"], networkAccess: true };
+  const turn = await turnPolicy(policy, env);
+  assert.deepEqual(turn.sandboxPolicy.writableRoots, ["/repo/worktree", ...roots]);
+  assert.equal(turn.sandboxPolicy.networkAccess, false);
+  assert.deepEqual(policy.writableRoots, ["/repo/worktree"], "the caller preset must not be mutated");
+  for (const invalid of ["not-json", JSON.stringify(["/tmp/other"]), JSON.stringify(["/repo/.git", "/unrelated"] )]) {
+    const invalidTurn = await turnPolicy(policy, { ...env, PAPERCLIP_GIT_METADATA_ROOTS: invalid });
+    assert.deepEqual(invalidTurn.sandboxPolicy.writableRoots, policy.writableRoots);
   }
 });
