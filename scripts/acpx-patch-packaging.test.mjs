@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
@@ -29,6 +29,51 @@ import {
   stageBundledEsbuildOptionalDependencies,
   stageBundledProviderOptionalDependencies,
 } from "./prepare-bundled-package.mjs";
+
+const codexGitMetadataPatch = await readFile(new URL("../patches/@agentclientprotocol__codex-acp@1.6.2.patch", import.meta.url), "utf8");
+
+function evaluatePaperclipGitMetadataRoots(env) {
+  // Evaluate the *actual code embedded in the package patch*, not a separately
+  // reimplemented helper that could drift from what an ACP worker executes.
+  const addedSource = codexGitMetadataPatch.split("\n")
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1)).join("\n");
+  const begin = addedSource.indexOf("function paperclipGitMetadataWritableRoots() {");
+  const end = addedSource.indexOf("function paperclipSandboxPolicy(", begin);
+  assert.ok(begin >= 0 && end > begin, "Missing Codex ACP Git metadata helper in pinned patch");
+  return Array.from(runInNewContext(
+    `${addedSource.slice(begin, end)}\npaperclipGitMetadataWritableRoots()`,
+    { process: { env }, path6: { isAbsolute, resolve, sep }, uniqueStrings: (values) => [...new Set(values)] },
+    { timeout: 500 },
+  ));
+}
+
+test("Codex ACP Git metadata roots are scoped to the isolated trusted Git worktree", () => {
+  const valid = ["/repos/simulator/.git", "/repos/simulator/.git/worktrees/issue-276"];
+  assert.deepEqual(evaluatePaperclipGitMetadataRoots({
+    PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1", PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify(valid),
+  }), valid);
+  assert.deepEqual(evaluatePaperclipGitMetadataRoots({
+    PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1", PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify([valid[0], valid[0]]),
+  }), [valid[0]]);
+  for (const value of ["not JSON", JSON.stringify(["/"]), JSON.stringify(["/etc"]),
+    JSON.stringify(["relative/.git"]), JSON.stringify([valid[0], "/tmp/unrelated"]),
+    JSON.stringify([valid[0], valid[1], valid[0]])]) {
+    assert.deepEqual(evaluatePaperclipGitMetadataRoots({
+      PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1", PAPERCLIP_GIT_METADATA_ROOTS: value,
+    }), [], `Invalid/foreign Git root must fail closed: ${value}`);
+  }
+  assert.deepEqual(evaluatePaperclipGitMetadataRoots({
+    PAPERCLIP_ACPX_ISOLATED_CONTEXT: "0", PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify(valid),
+  }), []);
+  assert.deepEqual(evaluatePaperclipGitMetadataRoots({ PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1" }), []);
+});
+
+test("Codex ACP metadata roots reach session and turn sandboxes but not skill discovery", () => {
+  assert.match(codexGitMetadataPatch, /configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots\(mergedConfig, \[\.\.\.additionalDirectories, \.\.\.paperclipGitMetadataWritableRoots\(\)\]\)/);
+  assert.match(codexGitMetadataPatch, /sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy\(paperclipSandboxPolicy\(agentMode\.sandboxPolicy\), \[\.\.\.additionalDirectories, \.\.\.paperclipGitMetadataWritableRoots\(\)\]\)/);
+  assert.doesNotMatch(codexGitMetadataPatch, /refreshSkills\([^\n]*paperclipGitMetadataWritableRoots/);
+});
 
 const rootPackage = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const profileData = JSON.parse(await readFile(new URL("../packages/paperclip-runner/acpx-profiles.json", import.meta.url), "utf8"));

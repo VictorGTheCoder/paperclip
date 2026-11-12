@@ -1,19 +1,8 @@
-diff --git a/package.json b/package.json
---- a/package.json
-+++ b/package.json
-@@ -65,7 +65,7 @@
-   },
-   "dependencies": {
-     "@agentclientprotocol/sdk": "^1.3.0",
--    "@openai/codex": "^0.148.0",
-+    "@openai/codex": "0.160.0",
-     "diff": "^9.0.0",
-     "open": "^11.0.0",
-     "vscode-jsonrpc": "^9.0.1",
 diff --git a/dist/index.js b/dist/index.js
+index eb58d3e..2d006ec 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -25341,7 +25341,7 @@
+@@ -25341,7 +25341,7 @@ var CodexElicitationHandler = class {
    async handleElicitation(params) {
      try {
        const context = this.createMcpElicitationContext(params);
@@ -22,7 +11,7 @@ diff --git a/dist/index.js b/dist/index.js
          const response2 = await this.connection.request(
            methods.client.elicitation.create,
            this.buildElicitationRequest(params, context),
-@@ -25563,7 +25563,7 @@
+@@ -25563,9 +25563,9 @@ var CodexElicitationHandler = class {
              toolCall: {
                toolCallId: context.correlatedCallId,
                kind: "execute",
@@ -32,7 +21,11 @@ diff --git a/dist/index.js b/dist/index.js
                // content: [messageContent],   — omitted: already rendered via item/started
 -              // rawInput: { ... }            — omitted: same reason
              },
-@@ -26988,4 +26988,18 @@
+             _meta: { is_mcp_tool_approval: true },
+             options
+@@ -26986,6 +26986,43 @@ var DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+ var SUPPORTED_GATEWAY_PROTOCOLS = {
+   openai: "responses"
  };
 +function paperclipBaseInstructions(request) {
 +  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1" && process.env.PAPERCLIP_RUNNER_HOME_MODE !== "preconfigured") return void 0;
@@ -43,6 +36,29 @@ diff --git a/dist/index.js b/dist/index.js
 +  }
 +  return void 0;
 +}
++// Paperclip discovers these real Git metadata roots from the admitted worktree
++// and overwrites any user-provided env binding. Project them only into Codex's
++// session/turn sandbox write policy, never ACP additionalDirectories: those are
++// also skill and trusted-project discovery roots.
++function paperclipGitMetadataWritableRoots() {
++  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1") return [];
++  const source = process.env.PAPERCLIP_GIT_METADATA_ROOTS;
++  if (typeof source !== "string" || !source) return [];
++  try {
++    const roots = JSON.parse(source);
++    if (!Array.isArray(roots) || roots.length === 0 || roots.length > 2) return [];
++    const checked = roots.map((root) => {
++      if (typeof root !== "string" || !path6.isAbsolute(root) || root.includes("\0")) return null;
++      const normalized = path6.resolve(root);
++      if (normalized === "/" || !(normalized.endsWith(`${path6.sep}.git`) || normalized.includes(`${path6.sep}.git${path6.sep}`))) return null;
++      return normalized;
++    });
++    if (checked.includes(null)) return [];
++    return uniqueStrings(checked);
++  } catch {
++    return [];
++  }
++}
 +function paperclipSandboxPolicy(sandboxPolicy) {
 +  const networkAccess = process.env.PAPERCLIP_CODEX_ACP_NETWORK_ACCESS;
 +  if (sandboxPolicy.type !== "workspaceWrite" || !["true", "false"].includes(networkAccess)) return sandboxPolicy;
@@ -51,7 +67,7 @@ diff --git a/dist/index.js b/dist/index.js
  var CodexAcpClient = class {
    codexClient;
    config;
-@@ -27288,6 +27297,7 @@
+@@ -27288,6 +27325,7 @@ var CodexAcpClient = class {
      const response = await this.codexClient.threadResume({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
        cwd: request.cwd,
@@ -59,7 +75,7 @@ diff --git a/dist/index.js b/dist/index.js
        modelProvider: await this.getResumeModelProvider(),
        threadId: request.sessionId
      });
-@@ -27310,6 +27320,7 @@
+@@ -27310,6 +27348,7 @@ var CodexAcpClient = class {
      const response = await this.codexClient.threadResume({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
        cwd: request.cwd,
@@ -67,14 +83,16 @@ diff --git a/dist/index.js b/dist/index.js
        modelProvider: await this.getResumeModelProvider(),
        threadId: request.sessionId
      });
-@@ -27337,5 +27348,6 @@
+@@ -27337,6 +27376,7 @@ var CodexAcpClient = class {
      const response = await this.codexClient.threadStart({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
        modelProvider: this.getModelProvider(),
 +      baseInstructions: paperclipBaseInstructions(request),
        cwd: request.cwd
      });
-@@ -27437,5 +27449,12 @@
+     const codexModels = await this.fetchAvailableModels();
+@@ -27436,11 +27476,18 @@ var CodexAcpClient = class {
+     });
      const mergedConfig = {
        ...mergeGatewayConfig(this.config, this.gatewayConfig),
 +      ...(process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT === "1" ? {
@@ -87,7 +105,13 @@ diff --git a/dist/index.js b/dist/index.js
        projects: Object.fromEntries(sessionRoots.map((root) => [root, {
          trust_level: "trusted"
        }]))
-@@ -27449,7 +27468,7 @@
+     };
+-    const configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots(mergedConfig, additionalDirectories);
++    const configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots(mergedConfig, [...additionalDirectories, ...paperclipGitMetadataWritableRoots()]);
+     if (mcpServers.length === 0) {
+       return configWithWorkspaceRoots;
+     }
+@@ -27449,7 +27496,7 @@ var CodexAcpClient = class {
        server: mcp
      }));
      let serversToConfigure = requestedServers;
@@ -96,8 +120,7 @@ diff --git a/dist/index.js b/dist/index.js
        const existingNames = await this.getConfigMcpServerNames(projectPath);
        serversToConfigure = requestedServers.filter((mcp) => !existingNames.has(mcp.name));
      }
-@@ -27483,14 +27502,15 @@
-   async refreshSkills(cwd, additionalRoots) {
+@@ -27484,13 +27531,14 @@ var CodexAcpClient = class {
      if (!cwd) {
        return;
      }
@@ -114,16 +137,16 @@ diff --git a/dist/index.js b/dist/index.js
        forceReload: true
      });
    }
-@@ -27600,7 +27624,7 @@
+@@ -27599,7 +27647,7 @@ var CodexAcpClient = class {
        threadId: request.sessionId,
        input,
        approvalPolicy: agentMode.approvalPolicy,
 -      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(agentMode.sandboxPolicy, additionalDirectories),
-+      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(paperclipSandboxPolicy(agentMode.sandboxPolicy), additionalDirectories),
++      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(paperclipSandboxPolicy(agentMode.sandboxPolicy), [...additionalDirectories, ...paperclipGitMetadataWritableRoots()]),
        summary: disableSummary ? "none" : "auto",
        effort,
        model: modelId.model,
-@@ -30595,6 +30614,9 @@
+@@ -30613,6 +30661,9 @@ var CodexAcpServer = class _CodexAcpServer {
                updatedGoal
              );
            }
@@ -133,3 +156,16 @@ diff --git a/dist/index.js b/dist/index.js
          } else if (methodRequest.params.action === "pause") {
            const goal = await this.runWithProcessCheck(() => this.codexAcpClient.setGoalStatus(sessionState.sessionId, "paused"));
            if (this.goalPublishIsCurrent(sessionState, sessionGeneration)) {
+diff --git a/package.json b/package.json
+index f1c17b0..c42ea22 100644
+--- a/package.json
++++ b/package.json
+@@ -65,7 +65,7 @@
+   },
+   "dependencies": {
+     "@agentclientprotocol/sdk": "^1.3.0",
+-    "@openai/codex": "^0.148.0",
++    "@openai/codex": "0.160.0",
+     "diff": "^9.0.0",
+     "open": "^11.0.0",
+     "vscode-jsonrpc": "^9.0.1",
