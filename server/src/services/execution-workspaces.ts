@@ -1379,13 +1379,13 @@ async function hasPendingTaskWorkspaceRecovery(tx: DbTransaction, input: {
   });
 }
 
-// Issue status and the /live-runs projection can become terminal before an ACP
-// worker has completed its workspace_finalize step. Do not allow a native archive
-// to remove the Git worktree during that gap. Use the *durable* finalization row,
-// not only current issue assignment/checkout pointers (which may be cleared as
-// soon as an agent marks a task done). Descendants are included because a shared
-// execution workspace may have child tasks without their own workspace binding.
-async function hasPendingNativeFinalizationForWorkspace(
+// A task may become done and lose its checkout/execution pointers before the
+// underlying legacy ACP run validates the Git worktree branch at workspace_finalize.
+// Native runner finalization uses nativeRunFinalizations; legacy ACP runs do NOT.
+// Both are grounded in durable issue/run/workspace operation rows rather than an
+// issue's transient executionRunId or the /issues/:id/live-runs projection.
+// Include descendants and linked worktree operations so shared workspaces are safe.
+async function hasUnsettledLinkedRunForWorkspace(
   reader: Db | DbTransaction,
   workspace: Pick<ExecutionWorkspaceRow, "companyId" | "id" | "sourceIssueId">,
 ): Promise<boolean> {
@@ -1400,18 +1400,59 @@ async function hasPendingNativeFinalizationForWorkspace(
       JOIN linked_issue parent ON child.parent_id = parent.id
       WHERE child.company_id = ${workspace.companyId}
     )
-    SELECT EXISTS (
-      SELECT 1 FROM ${nativeRunFinalizations} finalization
-      JOIN ${heartbeatRuns} run
-        ON run.id = finalization.run_id
-          AND run.company_id = finalization.company_id
-      WHERE finalization.company_id = ${workspace.companyId}
-        AND finalization.issue_id IN (SELECT id FROM linked_issue)
-        AND (
-          finalization.lease_owner IS NOT NULL
-          OR finalization.phase NOT IN ('committed', 'terminal_failure')
-          OR run.status IN ('queued', 'running')
-        )
+    SELECT (
+      EXISTS (
+        SELECT 1 FROM ${nativeRunFinalizations} finalization
+        JOIN ${heartbeatRuns} run
+          ON run.id = finalization.run_id AND run.company_id = finalization.company_id
+        WHERE finalization.company_id = ${workspace.companyId}
+          AND finalization.issue_id IN (SELECT id FROM linked_issue)
+          AND (
+            finalization.lease_owner IS NOT NULL
+            OR finalization.phase NOT IN ('committed', 'terminal_failure')
+            OR run.status IN ('queued', 'running')
+          )
+      )
+      OR EXISTS (
+        SELECT 1 FROM ${heartbeatRuns} run
+        WHERE run.company_id = ${workspace.companyId}
+          AND (
+            run.native_issue_id IN (SELECT id FROM linked_issue)
+            OR run.issue_id IN (SELECT id FROM linked_issue)
+            OR nullif(run.context_snapshot->>'issueId', '') IN (SELECT id::text FROM linked_issue)
+            OR nullif(run.context_snapshot->>'taskId', '') IN (SELECT id::text FROM linked_issue)
+            OR EXISTS (
+              SELECT 1 FROM ${workspaceOperations} operation
+              WHERE operation.company_id = ${workspace.companyId}
+                AND operation.heartbeat_run_id = run.id
+                AND (operation.execution_workspace_id = ${workspace.id}
+                  OR operation.issue_id IN (SELECT id FROM linked_issue))
+            )
+          )
+          AND (
+            run.status IN ('queued', 'running')
+            OR (
+              run.runtime_mode = 'legacy'
+              AND EXISTS (
+                SELECT 1 FROM ${workspaceOperations} prepared
+                WHERE prepared.heartbeat_run_id = run.id
+                  AND prepared.phase IN ('worktree_prepare', 'workspace_finalize')
+              )
+              -- A later failed finalize must not be eclipsed by an older
+              -- success on the same retried run. No finalization row is pending.
+              AND COALESCE((
+                SELECT finalized.status
+                FROM ${workspaceOperations} finalized
+                WHERE finalized.company_id = ${workspace.companyId}
+                  AND finalized.heartbeat_run_id = run.id
+                  AND finalized.phase = 'workspace_finalize'
+                ORDER BY finalized.created_at DESC,
+                  CASE WHEN finalized.status = 'succeeded' THEN 1 ELSE 0 END
+                LIMIT 1
+              ), 'pending') <> 'succeeded'
+            )
+          )
+      )
     ) AS pending
   `);
   return rows[0]?.pending === true;
@@ -2954,8 +2995,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       const { deliveryState } = await assessDelivery(workspace, git);
       const warnings = [...gitWarnings];
       const blockingReasons: string[] = [];
-      if (await hasPendingNativeFinalizationForWorkspace(db, workspace)) {
-        blockingReasons.push("A linked agent run is still finalizing this workspace; finish native run cleanup before archiving.");
+      if (await hasUnsettledLinkedRunForWorkspace(db, workspace)) {
+        blockingReasons.push("A linked agent run is still finalizing this workspace; finish its workspace validation before archiving.");
       }
       if (!statusInspectionSucceeded) {
         blockingReasons.push("Paperclip could not verify the workspace git status. Retry before destructive cleanup.");
@@ -3477,7 +3518,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // lock, so it never archives a workspace that a reopen just restored.
         const archived = await db.transaction(async (tx) => {
           await acquireExecutionWorkspaceLifecycleLock(tx, workspace.id);
-          if (await hasPendingNativeFinalizationForWorkspace(tx, workspace)) return null;
+          if (await hasUnsettledLinkedRunForWorkspace(tx, workspace)) return null;
           return tx
             .update(executionWorkspaces)
             .set({
@@ -4197,7 +4238,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           // archive again.
           return null;
         }
-        if (await hasPendingNativeFinalizationForWorkspace(tx, fresh)) {
+        if (await hasUnsettledLinkedRunForWorkspace(tx, fresh)) {
           // The caller's readiness snapshot is advisory; this check under the
           // lifecycle lock is the final fence against a task-done/run-finalizing
           // race before any destructive workspace operation.
