@@ -1433,7 +1433,11 @@ async function hasUnsettledLinkedRunForWorkspace(
       )
       -- A nested branch reconciliation can emit a succeeded operation while
       -- the enclosing legacy ACP workspace_finalize callback is STILL running.
-      -- No successful child receipt can release a live outer finalizer.
+      -- Legacy workspace operations have no durable callback owner or lease. A
+      -- terminal heartbeat run (or its expired controller lease) cannot prove
+      -- that this callback stopped, so keep this fence until an audited recovery
+      -- action records a terminal operation. No successful child/recovery
+      -- receipt can release a possibly-live outer finalizer.
       OR EXISTS (
         SELECT 1 FROM ${workspaceOperations} active_finalize
         JOIN ${heartbeatRuns} active_run
@@ -1476,6 +1480,25 @@ async function hasUnsettledLinkedRunForWorkspace(
             AND (final_operation.execution_workspace_id = ${workspace.id}
               OR (final_operation.execution_workspace_id IS NULL
                 AND final_operation.issue_id IN (SELECT id FROM linked_issue)))
+            -- A prior checkout validation cannot certify a checkout prepared
+            -- afterwards. Require the latest finalizer to have started after
+            -- the latest preparation completed (or began, if still running).
+            AND final_operation.started_at > COALESCE((
+              SELECT coalesce(preparation.finished_at, preparation.started_at, preparation.created_at)
+              FROM ${workspaceOperations} preparation
+              JOIN ${heartbeatRuns} preparation_run
+                ON preparation_run.id = preparation.heartbeat_run_id
+                AND preparation_run.company_id = preparation.company_id
+              WHERE preparation.company_id = ${workspace.companyId}
+                AND preparation_run.runtime_mode = 'legacy'
+                AND preparation.phase = 'worktree_prepare'
+                AND (preparation.execution_workspace_id = ${workspace.id}
+                  OR (preparation.execution_workspace_id IS NULL
+                    AND preparation.issue_id IN (SELECT id FROM linked_issue)))
+              ORDER BY coalesce(preparation.finished_at, preparation.started_at, preparation.created_at) DESC,
+                preparation.created_at DESC, preparation.id DESC
+              LIMIT 1
+            ), '-infinity'::timestamptz)
           ORDER BY coalesce(final_operation.finished_at, final_operation.created_at) DESC,
             final_operation.created_at DESC, final_operation.id DESC
           LIMIT 1
