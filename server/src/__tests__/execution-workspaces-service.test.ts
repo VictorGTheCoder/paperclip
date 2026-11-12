@@ -643,6 +643,71 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     }))?.outcome).toBe("archived");
   });
 
+  it("does not mistake a nested success for the enclosing ACP finalizer completion", async () => {
+    const seeded = await seedTerminalWorkspace({ mergedPr: true });
+    const agentId = randomUUID(), runId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId: seeded.companyId, name: "Legacy Codex ACP",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId: seeded.companyId, agentId,
+      status: "succeeded", runtimeMode: "legacy", issueId: seeded.sourceIssueId,
+    });
+    const started = new Date("2026-11-12T12:50:00Z");
+    const nestedAt = new Date("2026-11-12T12:50:02Z");
+    const [outer] = await db.insert(workspaceOperations).values({
+      companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId,
+      issueId: seeded.sourceIssueId, heartbeatRunId: runId,
+      phase: "workspace_finalize", status: "running", createdAt: started,
+    }).returning();
+    await db.insert(workspaceOperations).values({
+      companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId,
+      issueId: seeded.sourceIssueId, heartbeatRunId: runId,
+      phase: "workspace_finalize", status: "succeeded", createdAt: nestedAt, finishedAt: nestedAt,
+    });
+    expect((await svc.getCloseReadiness(seeded.executionWorkspaceId))?.isDestructiveCloseAllowed).toBe(false);
+    expect((await svc.archiveWorkspaceUnderLifecycleLock({
+      id: seeded.executionWorkspaceId, patch: {}, closedAt: new Date(),
+    }))?.outcome).toBe("finalizing");
+    await db.update(workspaceOperations).set({ status: "failed", finishedAt: new Date("2026-11-12T12:50:04Z") })
+      .where(eq(workspaceOperations.id, outer.id));
+    expect((await svc.getCloseReadiness(seeded.executionWorkspaceId))?.isDestructiveCloseAllowed).toBe(false);
+  });
+
+  it("allows a later successful recovery run to supersede a historical failed finalize", async () => {
+    const seeded = await seedTerminalWorkspace({ mergedPr: true });
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId: seeded.companyId, name: "Recovering ACP agent",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const oldRun = randomUUID(), newRun = randomUUID();
+    await db.insert(heartbeatRuns).values([
+      { id: oldRun, companyId: seeded.companyId, agentId, status: "failed", runtimeMode: "legacy", issueId: seeded.sourceIssueId },
+      { id: newRun, companyId: seeded.companyId, agentId, status: "succeeded", runtimeMode: "legacy", issueId: seeded.sourceIssueId, retryOfRunId: oldRun },
+    ]);
+    await db.insert(workspaceOperations).values([
+      { companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId,
+        heartbeatRunId: oldRun, issueId: seeded.sourceIssueId,
+        phase: "worktree_prepare", status: "succeeded", createdAt: new Date("2026-11-12T12:50:00Z"), finishedAt: new Date("2026-11-12T12:50:01Z") },
+      { companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId,
+        heartbeatRunId: oldRun, issueId: seeded.sourceIssueId,
+        phase: "workspace_finalize", status: "failed", createdAt: new Date("2026-11-12T12:51:00Z"), finishedAt: new Date("2026-11-12T12:51:01Z") },
+    ]);
+    expect((await svc.getCloseReadiness(seeded.executionWorkspaceId))?.isDestructiveCloseAllowed).toBe(false);
+    await db.insert(workspaceOperations).values({
+      companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId,
+      heartbeatRunId: newRun, issueId: seeded.sourceIssueId,
+      phase: "workspace_finalize", status: "succeeded", createdAt: new Date("2026-11-12T12:52:00Z"), finishedAt: new Date("2026-11-12T12:52:01Z"),
+    });
+    expect((await svc.getCloseReadiness(seeded.executionWorkspaceId))?.blockingReasons)
+      .not.toContain("A linked agent run is still finalizing this workspace; finish its workspace validation before archiving.");
+    expect((await svc.archiveWorkspaceUnderLifecycleLock({
+      id: seeded.executionWorkspaceId, patch: {}, closedAt: new Date(),
+    }))?.outcome).toBe("archived");
+  });
+
   it("keeps a terminal parent workspace until an unbound descendant finalizer settles", async () => {
     const seeded = await seedTerminalWorkspace({ mergedPr: true, childStatus: "done" });
     const child = await db.select({ id: issues.id }).from(issues)

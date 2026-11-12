@@ -1429,29 +1429,57 @@ async function hasUnsettledLinkedRunForWorkspace(
                   OR operation.issue_id IN (SELECT id FROM linked_issue))
             )
           )
-          AND (
-            run.status IN ('queued', 'running')
-            OR (
-              run.runtime_mode = 'legacy'
-              AND EXISTS (
-                SELECT 1 FROM ${workspaceOperations} prepared
-                WHERE prepared.heartbeat_run_id = run.id
-                  AND prepared.phase IN ('worktree_prepare', 'workspace_finalize')
-              )
-              -- A later failed finalize must not be eclipsed by an older
-              -- success on the same retried run. No finalization row is pending.
-              AND COALESCE((
-                SELECT finalized.status
-                FROM ${workspaceOperations} finalized
-                WHERE finalized.company_id = ${workspace.companyId}
-                  AND finalized.heartbeat_run_id = run.id
-                  AND finalized.phase = 'workspace_finalize'
-                ORDER BY finalized.created_at DESC,
-                  CASE WHEN finalized.status = 'succeeded' THEN 1 ELSE 0 END
-                LIMIT 1
-              ), 'pending') <> 'succeeded'
-            )
-          )
+          AND run.status IN ('queued', 'running')
+      )
+      -- A nested branch reconciliation can emit a succeeded operation while
+      -- the enclosing legacy ACP workspace_finalize callback is STILL running.
+      -- No successful child receipt can release a live outer finalizer.
+      OR EXISTS (
+        SELECT 1 FROM ${workspaceOperations} active_finalize
+        JOIN ${heartbeatRuns} active_run
+          ON active_run.id = active_finalize.heartbeat_run_id
+          AND active_run.company_id = active_finalize.company_id
+        WHERE active_finalize.company_id = ${workspace.companyId}
+          AND active_run.runtime_mode = 'legacy'
+          AND active_finalize.phase = 'workspace_finalize'
+          AND active_finalize.status = 'running'
+          AND (active_finalize.execution_workspace_id = ${workspace.id}
+            OR (active_finalize.execution_workspace_id IS NULL
+              AND active_finalize.issue_id IN (SELECT id FROM linked_issue)))
+      )
+      -- A failed historical attempt may be superseded by a later successful
+      -- revalidation of this same worktree (including a new retry run ID).
+      -- Rank terminal operations by when they actually FINISHED, rather than
+      -- created_at: an outer failure can finish after a nested success.
+      OR (
+        EXISTS (
+          SELECT 1 FROM ${workspaceOperations} inspected
+          JOIN ${heartbeatRuns} inspected_run
+            ON inspected_run.id = inspected.heartbeat_run_id
+            AND inspected_run.company_id = inspected.company_id
+          WHERE inspected.company_id = ${workspace.companyId}
+            AND inspected_run.runtime_mode = 'legacy'
+            AND inspected.phase IN ('worktree_prepare', 'workspace_finalize')
+            AND (inspected.execution_workspace_id = ${workspace.id}
+              OR (inspected.execution_workspace_id IS NULL
+                AND inspected.issue_id IN (SELECT id FROM linked_issue)))
+        )
+        AND COALESCE((
+          SELECT final_operation.status
+          FROM ${workspaceOperations} final_operation
+          JOIN ${heartbeatRuns} final_run
+            ON final_run.id = final_operation.heartbeat_run_id
+            AND final_run.company_id = final_operation.company_id
+          WHERE final_operation.company_id = ${workspace.companyId}
+            AND final_run.runtime_mode = 'legacy'
+            AND final_operation.phase = 'workspace_finalize'
+            AND (final_operation.execution_workspace_id = ${workspace.id}
+              OR (final_operation.execution_workspace_id IS NULL
+                AND final_operation.issue_id IN (SELECT id FROM linked_issue)))
+          ORDER BY coalesce(final_operation.finished_at, final_operation.created_at) DESC,
+            final_operation.created_at DESC, final_operation.id DESC
+          LIMIT 1
+        ), 'pending') <> 'succeeded'
       )
     ) AS pending
   `);
