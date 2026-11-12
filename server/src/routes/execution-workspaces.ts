@@ -1225,6 +1225,12 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
         res.status(404).json({ error: "Execution workspace not found" });
         return;
       }
+      if (archiveResult.outcome === "finalizing") {
+        res.status(409).json({
+          error: "A linked agent run is still finalizing this workspace; archive after native run cleanup settles",
+        });
+        return;
+      }
       if (archiveResult.outcome === "reopen_pending") {
         // A reopen published this workspace as active while its source issue is
         // still terminal. A caller will consume the rebuilt worktree. Refuse the

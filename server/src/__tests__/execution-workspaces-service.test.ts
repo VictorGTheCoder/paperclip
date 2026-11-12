@@ -17,6 +17,7 @@ import {
   databaseWorkPending,
   executionWorkspaces,
   heartbeatRuns,
+  nativeRunFinalizations,
   issueComments,
   issueReferenceMentions,
   issueRecoveryActions,
@@ -279,6 +280,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     await db.delete(issueWorkProducts);
     await db.delete(issueReferenceMentions);
     await db.delete(issueComments);
+    await db.delete(nativeRunFinalizations);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -522,6 +524,88 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     }
     return { companyId, projectId, executionWorkspaceId, sourceIssueId, identifier, repoRoot, worktreePath, headSha };
   }
+
+  it("blocks manual and automatic archive while an apparently terminal ACP run is still finalizing", async () => {
+    const seeded = await seedTerminalWorkspace({ mergedPr: true });
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId: seeded.companyId,
+      name: "Finalizing Codex agent",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    // Task is already done and run telemetry looks terminal, as in the incident.
+    // Durable finalization is still owned and must remain the cleanup authority.
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: seeded.companyId,
+      agentId,
+      status: "succeeded",
+      nativeIssueId: seeded.sourceIssueId,
+      runtimeMode: "native",
+      finishedAt: new Date(),
+    });
+    await db.insert(nativeRunFinalizations).values({
+      runId,
+      companyId: seeded.companyId,
+      issueId: seeded.sourceIssueId,
+      phase: "publishing",
+      leaseOwner: "active-native-finalizer",
+    });
+
+    const pending = await svc.getCloseReadiness(seeded.executionWorkspaceId);
+    expect(pending?.isDestructiveCloseAllowed).toBe(false);
+    expect(pending?.blockingReasons).toContain(
+      "A linked agent run is still finalizing this workspace; finish native run cleanup before archiving.",
+    );
+    expect(await svc.archiveWorkspaceUnderLifecycleLock({
+      id: seeded.executionWorkspaceId, patch: {}, closedAt: new Date(),
+    })).toEqual({ outcome: "finalizing" });
+    await expect(fs.access(seeded.worktreePath)).resolves.toBeUndefined();
+    const after = await db.select({ status: executionWorkspaces.status })
+      .from(executionWorkspaces).where(eq(executionWorkspaces.id, seeded.executionWorkspaceId));
+    expect(after[0]?.status).toBe("active");
+
+    await db.update(nativeRunFinalizations).set({ phase: "committed", leaseOwner: null })
+      .where(eq(nativeRunFinalizations.runId, runId));
+    const settled = await svc.getCloseReadiness(seeded.executionWorkspaceId);
+    expect(settled?.blockingReasons).not.toContain(
+      "A linked agent run is still finalizing this workspace; finish native run cleanup before archiving.",
+    );
+    const archived = await svc.archiveWorkspaceUnderLifecycleLock({
+      id: seeded.executionWorkspaceId, patch: {}, closedAt: new Date(),
+    });
+    expect(archived?.outcome).toBe("archived");
+  });
+
+  it("keeps a terminal parent workspace until an unbound descendant finalizer settles", async () => {
+    const seeded = await seedTerminalWorkspace({ mergedPr: true, childStatus: "done" });
+    const child = await db.select({ id: issues.id }).from(issues)
+      .where(eq(issues.parentId, seeded.sourceIssueId));
+    const childIssueId = child[0]!.id;
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId: seeded.companyId, name: "Child runner",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId: seeded.companyId, agentId,
+      status: "succeeded", nativeIssueId: childIssueId, runtimeMode: "native",
+    });
+    await db.insert(nativeRunFinalizations).values({
+      runId, companyId: seeded.companyId, issueId: childIssueId,
+      phase: "workspace_finalize", leaseOwner: "child-finalizer",
+    });
+    expect((await svc.getCloseReadiness(seeded.executionWorkspaceId))?.isDestructiveCloseAllowed).toBe(false);
+    expect((await svc.archiveWorkspaceUnderLifecycleLock({
+      id: seeded.executionWorkspaceId, patch: {}, closedAt: new Date(),
+    }))?.outcome).toBe("finalizing");
+  });
 
   it("skips nonterminal trees, cooldowns, and active runs without a Git scan", async () => {
     await seedTerminalWorkspace({ childStatus: "todo" });

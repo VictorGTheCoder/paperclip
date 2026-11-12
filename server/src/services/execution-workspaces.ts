@@ -1379,6 +1379,44 @@ async function hasPendingTaskWorkspaceRecovery(tx: DbTransaction, input: {
   });
 }
 
+// Issue status and the /live-runs projection can become terminal before an ACP
+// worker has completed its workspace_finalize step. Do not allow a native archive
+// to remove the Git worktree during that gap. Use the *durable* finalization row,
+// not only current issue assignment/checkout pointers (which may be cleared as
+// soon as an agent marks a task done). Descendants are included because a shared
+// execution workspace may have child tasks without their own workspace binding.
+async function hasPendingNativeFinalizationForWorkspace(
+  reader: Db | DbTransaction,
+  workspace: Pick<ExecutionWorkspaceRow, "companyId" | "id" | "sourceIssueId">,
+): Promise<boolean> {
+  const rows = await reader.execute<{ pending: boolean }>(sql`
+    WITH RECURSIVE linked_issue(id) AS (
+      SELECT root.id FROM ${issues} root
+      WHERE root.company_id = ${workspace.companyId}
+        AND (root.execution_workspace_id = ${workspace.id}
+          OR root.id = ${workspace.sourceIssueId})
+      UNION
+      SELECT child.id FROM ${issues} child
+      JOIN linked_issue parent ON child.parent_id = parent.id
+      WHERE child.company_id = ${workspace.companyId}
+    )
+    SELECT EXISTS (
+      SELECT 1 FROM ${nativeRunFinalizations} finalization
+      JOIN ${heartbeatRuns} run
+        ON run.id = finalization.run_id
+          AND run.company_id = finalization.company_id
+      WHERE finalization.company_id = ${workspace.companyId}
+        AND finalization.issue_id IN (SELECT id FROM linked_issue)
+        AND (
+          finalization.lease_owner IS NOT NULL
+          OR finalization.phase NOT IN ('committed', 'terminal_failure')
+          OR run.status IN ('queued', 'running')
+        )
+    ) AS pending
+  `);
+  return rows[0]?.pending === true;
+}
+
 // Compaction trash older than this belongs to no compaction in progress: the
 // move and the guard finish in one short transaction.
 const WORKSPACE_COMPACTION_TRASH_STALE_MS = 60 * 60 * 1000;
@@ -2916,6 +2954,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       const { deliveryState } = await assessDelivery(workspace, git);
       const warnings = [...gitWarnings];
       const blockingReasons: string[] = [];
+      if (await hasPendingNativeFinalizationForWorkspace(db, workspace)) {
+        blockingReasons.push("A linked agent run is still finalizing this workspace; finish native run cleanup before archiving.");
+      }
       if (!statusInspectionSucceeded) {
         blockingReasons.push("Paperclip could not verify the workspace git status. Retry before destructive cleanup.");
       }
@@ -3436,6 +3477,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // lock, so it never archives a workspace that a reopen just restored.
         const archived = await db.transaction(async (tx) => {
           await acquireExecutionWorkspaceLifecycleLock(tx, workspace.id);
+          if (await hasPendingNativeFinalizationForWorkspace(tx, workspace)) return null;
           return tx
             .update(executionWorkspaces)
             .set({
@@ -4135,6 +4177,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     }): Promise<
       | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
       | { outcome: "reopen_pending" }
+      | { outcome: "finalizing" }
       | null
     > => {
       const [identity] = await db.select({ companyId: executionWorkspaces.companyId }).from(executionWorkspaces)
@@ -4153,6 +4196,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           // The row is missing or already closed by a concurrent path. Do not
           // archive again.
           return null;
+        }
+        if (await hasPendingNativeFinalizationForWorkspace(tx, fresh)) {
+          // The caller's readiness snapshot is advisory; this check under the
+          // lifecycle lock is the final fence against a task-done/run-finalizing
+          // race before any destructive workspace operation.
+          return { outcome: "finalizing" };
         }
         if (metadataHasReopenPendingConsumption(fresh.metadata as Record<string, unknown> | null)) {
           // A reopen published this row as active while its source issue is still
