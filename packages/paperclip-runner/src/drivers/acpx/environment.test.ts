@@ -40,6 +40,23 @@ describe("ACPX launch environment", () => {
     expect(createSanitizedAcpxSpawnInput(source, "cursor").env).toEqual({});
   });
 
+  it("forwards the controller-derived linked-worktree metadata only for explicit Codex launches", () => {
+    const roots = JSON.stringify(["/repo/.git", "/repo/.git/worktrees/issue-276"]);
+    const injected = { PAPERCLIP_GIT_METADATA_ROOTS: roots, UNRELATED_SECRET: "private" };
+    const actual = createSanitizedAcpxSpawnInput(injected, "codex");
+    expect(actual.env.PAPERCLIP_GIT_METADATA_ROOTS).toBe(roots);
+    expect(actual.env.UNRELATED_SECRET).toBeUndefined();
+    for (const agent of ["claude", "pi", "cursor", "copilot"] as const) {
+      expect(createSanitizedAcpxSpawnInput(injected, agent).env.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+    }
+    vi.stubEnv("PAPERCLIP_GIT_METADATA_ROOTS", roots);
+    expect(createSanitizedAcpxSpawnInput(undefined, "codex").env.PAPERCLIP_GIT_METADATA_ROOTS)
+      .toBeUndefined();
+    // End-user config projections are not permitted to mint the generated key.
+    expect(configuredEnvironmentProjection(injected).PAPERCLIP_GIT_METADATA_ROOTS)
+      .toBeUndefined();
+  });
+
   it("projects only the selected agent's credentials and runtime allowlist", () => {
     const source = {
       PATH: "/bin",

@@ -126,6 +126,10 @@ export function createSanitizedAcpxSpawnInput(
     "RUST_BACKTRACE",
     "PAPERCLIP_NATIVE_MCP_NAME",
     "PAPERCLIP_NATIVE_MCP_URL",
+    // This value is minted by the execution-target Git workspace probe *after*
+    // configured user env is filtered. Never take it from ambient process.env,
+    // and never forward it to another agent/skill discovery path.
+    ...(agent === "codex" && environment !== undefined ? ["PAPERCLIP_GIT_METADATA_ROOTS"] : []),
     ...(environment === undefined ? [] : ["PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY"]),
     ...credentialNames,
     ...(agent === "claude" ? CLAUDE_ROUTING_ENV_KEYS : []),

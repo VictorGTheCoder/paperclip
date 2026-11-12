@@ -53,6 +53,24 @@ describe("ACPX runtime sandbox", () => {
     for (const value of Object.values(pages)) expect(config).not.toContain(value);
   });
 
+  it("carries trusted Codex metadata roots to the actual isolated launcher, not persisted state", async () => {
+    const fixture = await sandboxFixture("codex");
+    const roots = JSON.stringify(["/repo/.git", "/repo/.git/worktrees/issue-276"]);
+    const sandbox = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding, agent: "codex",
+      environment: { PATH: process.env.PATH, PAPERCLIP_GIT_METADATA_ROOTS: roots },
+    });
+    expect(sandbox.launchEnvironment.PAPERCLIP_GIT_METADATA_ROOTS).toBe(roots);
+    expect(sandbox.launchEnvironment.PAPERCLIP_ACPX_ISOLATED_CONTEXT).toBe("1");
+    expect(sandbox.persistedEnvironment.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+    // The same controller projection is not an authorization for Claude.
+    const other = await prepareAcpxRuntimeSandbox({
+      binding: (await sandboxFixture("claude")).binding, agent: "claude",
+      environment: { PATH: process.env.PATH, PAPERCLIP_GIT_METADATA_ROOTS: roots },
+    });
+    expect(other.launchEnvironment.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+  });
+
   it.each(["claude", "codex"] as const)("uses existing %s home without creating or changing config", async (agent) => {
     const fixture = await sandboxFixture(agent);
     const home = join(temporaryDirectories.at(-1)!, "user-home");
