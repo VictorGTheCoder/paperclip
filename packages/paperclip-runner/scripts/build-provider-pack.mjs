@@ -331,7 +331,7 @@ try {
       claude:
         "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",
       codex:
-        "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+        "sha256:149e29b605e7cf04a889280d005d541c92d4a8140472f9f93648c86cab9f1fb4",
     },
     ...(candidates.length ? { candidateProviders } : {}),
     artifacts: {

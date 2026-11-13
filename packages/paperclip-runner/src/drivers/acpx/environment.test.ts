@@ -47,6 +47,20 @@ describe("ACPX launch environment", () => {
     expect(Object.isFrozen(codex.env)).toBe(true);
   });
 
+  it("forwards controller-derived Git metadata roots only to explicit Codex ACP launches", () => {
+    const roots = JSON.stringify(["/repo/.git", "/repo/.git/worktrees/issue-1"]);
+    const explicit = { PAPERCLIP_GIT_METADATA_ROOTS: roots, UNRELATED_SECRET: "private" };
+    expect(createSanitizedAcpxSpawnInput(explicit, "codex").env).toMatchObject({
+      PAPERCLIP_GIT_METADATA_ROOTS: roots,
+    });
+    expect(createSanitizedAcpxSpawnInput(explicit, "codex").env.UNRELATED_SECRET).toBeUndefined();
+    for (const agent of ["claude", "grok", "pi", "cursor", "copilot"] as const) {
+      expect(createSanitizedAcpxSpawnInput(explicit, agent).env.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+    }
+    vi.stubEnv("PAPERCLIP_GIT_METADATA_ROOTS", roots);
+    expect(createSanitizedAcpxSpawnInput(undefined, "codex").env.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+  });
+
   it.each([
     ["pi", "OPENROUTER_API_KEY"], ["cursor", "CURSOR_API_KEY"],
     ["cursor", "CURSOR_AUTH_TOKEN"], ["copilot", "COPILOT_GITHUB_TOKEN"],

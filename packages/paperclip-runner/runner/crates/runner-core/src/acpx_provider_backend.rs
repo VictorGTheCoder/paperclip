@@ -162,7 +162,7 @@ impl AcpxProviderDescriptor {
                 "1.6.2",
                 Some("@openai/codex"),
                 Some("0.160.0"),
-                "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+                "sha256:149e29b605e7cf04a889280d005d541c92d4a8140472f9f93648c86cab9f1fb4",
             ),
             "pi" => (
                 "openrouter/deepseek/deepseek-v4-flash-0731",
@@ -2267,7 +2267,7 @@ mod tests {
                     "1.6.2",
                     json!("@openai/codex"),
                     json!("0.160.0"),
-                    "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+                    "sha256:149e29b605e7cf04a889280d005d541c92d4a8140472f9f93648c86cab9f1fb4",
                 )
             };
         json!({

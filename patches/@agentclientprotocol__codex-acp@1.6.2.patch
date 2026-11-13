@@ -32,7 +32,7 @@ diff --git a/dist/index.js b/dist/index.js
                // content: [messageContent],   — omitted: already rendered via item/started
 -              // rawInput: { ... }            — omitted: same reason
              },
-@@ -26988,4 +26988,18 @@
+@@ -26988,4 +26988,46 @@
  };
 +function paperclipBaseInstructions(request) {
 +  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1") return void 0;
@@ -47,6 +47,34 @@ diff --git a/dist/index.js b/dist/index.js
 +  const networkAccess = process.env.PAPERCLIP_CODEX_ACP_NETWORK_ACCESS;
 +  if (sandboxPolicy.type !== "workspaceWrite" || !["true", "false"].includes(networkAccess)) return sandboxPolicy;
 +  return { ...sandboxPolicy, networkAccess: networkAccess === "true" && process.env.PAPERCLIP_RUNNER_NETWORK_ACCESS !== "disabled" };
++}
++// The controller injects these real Git metadata roots from the execution-target
++// probe. They are writable only for Git metadata operations, never Codex project,
++// trust, or skill discovery roots.
++function paperclipGitMetadataWritableRoots() {
++  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1") return [];
++  const source = process.env.PAPERCLIP_GIT_METADATA_ROOTS;
++  if (typeof source !== "string" || !source || source.length > 16 * 1024) return [];
++  try {
++    const roots = JSON.parse(source);
++    if (!Array.isArray(roots) || roots.length === 0 || roots.length > 2) return [];
++    const checked = roots.map((root) => {
++      if (typeof root !== "string" || root.includes("\0") || !path6.isAbsolute(root)) return null;
++      let normalized;
++      try {
++        normalized = fs7.realpathSync.native(root);
++        if (!fs7.statSync(normalized).isDirectory()) return null;
++      } catch {
++        return null;
++      }
++      if (normalized === path6.parse(normalized).root || !(normalized.endsWith(`${path6.sep}.git`) || normalized.includes(`${path6.sep}.git${path6.sep}`))) return null;
++      return normalized;
++    });
++    if (checked.includes(null)) return [];
++    return uniqueStrings(checked);
++  } catch {
++    return [];
++  }
 +}
  var CodexAcpClient = class {
    codexClient;
@@ -87,7 +115,12 @@ diff --git a/dist/index.js b/dist/index.js
        projects: Object.fromEntries(sessionRoots.map((root) => [root, {
          trust_level: "trusted"
        }]))
-@@ -27449,7 +27468,7 @@
+@@ -27443,3 +27468,3 @@
+-    const configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots(mergedConfig, additionalDirectories);
++    const configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots(mergedConfig, [...additionalDirectories, ...paperclipGitMetadataWritableRoots()]);
+     if (mcpServers.length === 0) {
+       return configWithWorkspaceRoots;
+@@ -27449,7 +27475,7 @@
        server: mcp
      }));
      let serversToConfigure = requestedServers;
@@ -119,7 +152,7 @@ diff --git a/dist/index.js b/dist/index.js
        input,
        approvalPolicy: agentMode.approvalPolicy,
 -      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(agentMode.sandboxPolicy, additionalDirectories),
-+      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(paperclipSandboxPolicy(agentMode.sandboxPolicy), additionalDirectories),
++      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(paperclipSandboxPolicy(agentMode.sandboxPolicy), [...additionalDirectories, ...paperclipGitMetadataWritableRoots()]),
        summary: disableSummary ? "none" : "auto",
        effort,
        model: modelId.model,
