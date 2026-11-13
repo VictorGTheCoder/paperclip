@@ -1621,10 +1621,15 @@ if (process.argv[1] === 'host') {
   env.PAPERCLIP_GITHUB_HOST_HOME = process.env.HOME || '';
   env.GH_CONFIG_DIR ||= path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '', '.config'), 'gh');
 }
+// Repository-selection variables bypass Git's directory discovery. Remove
+// all GIT_* overrides only from the read-only metadata child; host credential
+// capture above and the returned ordinary execution env remain unchanged.
+const gitProbeEnv = Object.fromEntries(Object.entries(process.env)
+  .filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
 try {
-  const top = cp.execFileSync('git', ['rev-parse', '--show-toplevel'], {encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
+  const top = cp.execFileSync('git', ['rev-parse', '--show-toplevel'], {encoding:'utf8',stdio:['ignore','pipe','ignore'],env:gitProbeEnv}).trim();
   if (fs.realpathSync(top) === fs.realpathSync(process.cwd())) {
-    env.PAPERCLIP_GIT_METADATA_ROOTS = JSON.stringify(cp.execFileSync('git', ['rev-parse','--path-format=absolute','--git-common-dir','--git-dir'], {encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim().split('\n').map(p => fs.realpathSync(p)));
+    env.PAPERCLIP_GIT_METADATA_ROOTS = JSON.stringify(cp.execFileSync('git', ['rev-parse','--path-format=absolute','--git-common-dir','--git-dir'], {encoding:'utf8',stdio:['ignore','pipe','ignore'],env:gitProbeEnv}).trim().split('\n').map(p => fs.realpathSync(p)));
   }
 } catch {}
 process.stdout.write("\0" + JSON.stringify(env) + "\0");
@@ -1666,11 +1671,19 @@ for file in /etc/resolv.conf /etc/hosts /etc/nsswitch.conf /etc/ssl/certs /etc/s
     printf 'PAPERCLIP_RUNNER_NETWORK_ROOT\0%s\0' "$parent/$(basename "$file")"
   fi
 done
+# Match local discovery semantics without changing the target's credential
+# capture or parent shell. Only the child Git probe loses GIT_* overrides.
+git_probe() (
+  for key in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$key"
+  done
+  git "$@"
+)
 cwd=$(pwd -P)
-top=$(git rev-parse --show-toplevel 2>/dev/null) || top=
+top=$(git_probe rev-parse --show-toplevel 2>/dev/null) || top=
 if [ -n "$top" ] && [ "$(cd "$top" && pwd -P)" = "$cwd" ]; then
   for kind in --git-common-dir --git-dir; do
-    root=$(git rev-parse --path-format=absolute "$kind" 2>/dev/null) || continue
+    root=$(git_probe rev-parse --path-format=absolute "$kind" 2>/dev/null) || continue
     root=$(cd "$root" && pwd -P) || continue
     printf 'PAPERCLIP_GIT_METADATA_ROOT\0%s\0' "$root"
   done

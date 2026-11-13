@@ -176,6 +176,67 @@ describe("managed GitHub launcher environment", () => {
     expect(env.PAPERCLIP_GITHUB_LAUNCHER_DIR).toBeUndefined();
   });
 
+  it.each([false, true])("does not admit ambient Git repository selectors in a real local probe (host credentials: %s)", async (hostCredentials) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-root-probe-"));
+    roots.push(root);
+    const repo = path.join(root, "admitted");
+    const linked = path.join(root, "linked");
+    const foreign = path.join(root, "unrelated");
+    const initEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
+    await exec("git", ["init", repo], { env: initEnv });
+    await exec("git", ["-C", repo, "-c", "user.name=Probe", "-c", "user.email=probe@example.invalid", "commit", "--allow-empty", "-qm", "fixture"], { env: initEnv });
+    await exec("git", ["-C", repo, "worktree", "add", "--detach", linked, "HEAD"], { env: initEnv });
+    await exec("git", ["init", foreign], { env: initEnv });
+    const foreignGit = await realpath(path.join(foreign, ".git"));
+    vi.stubEnv("GIT_DIR", foreignGit);
+    vi.stubEnv("GIT_WORK_TREE", linked);
+    vi.stubEnv("GIT_COMMON_DIR", foreignGit);
+    vi.stubEnv("GIT_INDEX_FILE", path.join(foreignGit, "injected-index"));
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "core.worktree");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", linked);
+    const env = await prepareGitHubExecutionEnvironment({
+      target: null, cwd: linked,
+      env: { PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify([foreignGit]) },
+      hostCredentials, networkAccess: false,
+    });
+    expect(JSON.parse(env.PAPERCLIP_GIT_METADATA_ROOTS!)).toEqual([
+      await realpath(path.join(repo, ".git")),
+      await realpath(path.join(repo, ".git", "worktrees", "linked")),
+    ]);
+    expect(env.PAPERCLIP_GIT_METADATA_ROOTS).not.toContain(foreignGit);
+    expect(env.PAPERCLIP_RUNNER_NETWORK_ACCESS).toBe("disabled");
+    // Sanitization is limited to discovery's child process, not the operator's
+    // process environment or the existing host-credential forwarding contract.
+    expect(process.env.GIT_DIR).toBe(foreignGit);
+    expect(env.GIT_CONFIG_VALUE_0).toBe(hostCredentials ? linked : undefined);
+  });
+
+  it("does not admit remote Git repository selectors from the real target shell", async () => {
+    const fixture = await sandbox("usr/bin");
+    await rm(path.join(fixture.bin, "git"));
+    await exec("git", ["init", fixture.root]);
+    const foreign = await mkdtemp(path.join(os.tmpdir(), "paperclip-unrelated-git-"));
+    roots.push(foreign);
+    await exec("git", ["init", foreign]);
+    const foreignGit = await realpath(path.join(foreign, ".git"));
+    const execute = fixture.runner.execute.getMockImplementation()!;
+    fixture.runner.execute.mockImplementation((input) => execute({
+      ...input, env: { ...input.env,
+        GIT_DIR: foreignGit, GIT_WORK_TREE: fixture.root, GIT_COMMON_DIR: foreignGit,
+        GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.worktree", GIT_CONFIG_VALUE_0: fixture.root,
+      },
+    }));
+    const env = await prepareGitHubExecutionEnvironment({
+      target: fixture.target, cwd: "/controller-not-admitted", env: {},
+      hostCredentials: false, networkAccess: false,
+    });
+    expect(JSON.parse(env.PAPERCLIP_GIT_METADATA_ROOTS!)).toEqual([
+      await realpath(path.join(fixture.root, ".git")),
+    ]);
+    expect(env.PAPERCLIP_GIT_METADATA_ROOTS).not.toContain(foreignGit);
+  });
+
   it("preserves local host credential helpers and validates worktree metadata", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-host-git-")); roots.push(root);
     vi.stubEnv("HOME", root);

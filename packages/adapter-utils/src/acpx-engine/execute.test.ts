@@ -6,6 +6,7 @@ import { createRuntimeStore, type AcpRuntimeOptions, type AcpSessionRecord, type
 import type { AdapterExecutionContext, AdapterRuntimeMcpAccess } from "@paperclipai/adapter-utils";
 import {
   DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC,
+  prepareGitHubExecutionEnvironment,
   prepareAdapterExecutionTargetRuntime,
   startAdapterExecutionTargetPaperclipBridge,
   startAdapterExecutionTargetProcessSessionBridge,
@@ -20,6 +21,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importActual) => {
   const actual = await importActual<typeof import("@paperclipai/adapter-utils/execution-target")>();
   return {
     ...actual,
+    prepareGitHubExecutionEnvironment: vi.fn(actual.prepareGitHubExecutionEnvironment),
     prepareAdapterExecutionTargetRuntime: vi.fn(actual.prepareAdapterExecutionTargetRuntime),
     startAdapterExecutionTargetPaperclipBridge: vi.fn(actual.startAdapterExecutionTargetPaperclipBridge),
     startAdapterExecutionTargetProcessSessionBridge: vi.fn(actual.startAdapterExecutionTargetProcessSessionBridge),
@@ -1649,6 +1651,96 @@ describe("shared ACPX engine runtime behavior", () => {
     const authStat = await fs.lstat(managedAuth);
     expect(authStat.isSymbolicLink()).toBe(true);
     expect(path.resolve(path.dirname(managedAuth), await fs.readlink(managedAuth))).toBe(sourceAuth);
+  });
+
+  it("uses controller-derived Git roots for legacy Codex ACP and rejects configured scope injection", async () => {
+    const root = await makeTempRoot();
+    vi.mocked(prepareGitHubExecutionEnvironment).mockResolvedValueOnce({
+      PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify([path.join(root, "common.git")]),
+      PAPERCLIP_RUNNER_NETWORK_ROOTS: "[]",
+      PAPERCLIP_GITHUB_AUTH_MODE: "managed",
+      PAPERCLIP_RUNNER_NETWORK_ACCESS: "disabled",
+    });
+
+    const { sessionInputs } = await runExecutor({
+      agent: "codex",
+      agentCommand: "node ./legacy-codex-acp.js",
+      cwd: root,
+      stateDir: path.join(root, "state"),
+      env: {
+        PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify(["/operator/injected/.git"]),
+        PAPERCLIP_ACPX_GIT_METADATA_SCOPE: "1",
+      },
+      paperclipRuntimeSkills: [],
+      paperclipSkillSync: { desiredSkills: [] },
+    }, { context: { paperclipWorkspace: { cwd: root, source: "project_primary" } } });
+
+    expect(prepareGitHubExecutionEnvironment).toHaveBeenCalledWith({
+      target: null,
+      cwd: root,
+      env: {},
+      hostCredentials: false,
+      networkAccess: false,
+    });
+    const env = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.PAPERCLIP_GIT_METADATA_ROOTS).toBe(JSON.stringify([path.join(root, "common.git")]));
+    expect(env.PAPERCLIP_ACPX_GIT_METADATA_SCOPE).toBe("1");
+  });
+
+  it("removes configured Git roots and scope marker when controller finds no Git metadata", async () => {
+    const root = await makeTempRoot();
+    vi.mocked(prepareGitHubExecutionEnvironment).mockResolvedValueOnce({
+      PAPERCLIP_GIT_METADATA_ROOTS: "[]",
+      PAPERCLIP_RUNNER_NETWORK_ROOTS: "[]",
+      PAPERCLIP_GITHUB_AUTH_MODE: "managed",
+      PAPERCLIP_RUNNER_NETWORK_ACCESS: "disabled",
+    });
+
+    const { sessionInputs } = await runExecutor({
+      agent: "codex",
+      agentCommand: "node ./legacy-codex-acp.js",
+      cwd: root,
+      stateDir: path.join(root, "state"),
+      env: {
+        PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify(["/operator/injected/.git"]),
+        PAPERCLIP_ACPX_GIT_METADATA_SCOPE: "1",
+      },
+      paperclipRuntimeSkills: [],
+      paperclipSkillSync: { desiredSkills: [] },
+    }, { context: { paperclipWorkspace: { cwd: root, source: "project_primary" } } });
+
+    const env = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+    expect(env.PAPERCLIP_ACPX_GIT_METADATA_SCOPE).toBeUndefined();
+  });
+
+  it("does not discover Git roots from configured cwd or ambient scope variables", async () => {
+    const root = await makeTempRoot();
+    vi.stubEnv("PAPERCLIP_GIT_METADATA_ROOTS", JSON.stringify(["/ambient/injected/.git"]));
+    vi.stubEnv("PAPERCLIP_ACPX_GIT_METADATA_SCOPE", "1");
+    try {
+      const { sessionInputs } = await runExecutor({
+        agent: "codex",
+        agentCommand: "node ./legacy-codex-acp.js",
+        cwd: root,
+        stateDir: path.join(root, "state"),
+        env: {
+          PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify(["/operator/injected/.git"]),
+          PAPERCLIP_ACPX_GIT_METADATA_SCOPE: "1",
+        },
+        paperclipRuntimeSkills: [],
+        paperclipSkillSync: { desiredSkills: [] },
+      });
+
+      expect(prepareGitHubExecutionEnvironment).not.toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: root }),
+      );
+      const env = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
+      expect(env.PAPERCLIP_GIT_METADATA_ROOTS).toBeUndefined();
+      expect(env.PAPERCLIP_ACPX_GIT_METADATA_SCOPE).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it.each(["OPENAI_API_KEY", "CODEX_API_KEY"] as const)(

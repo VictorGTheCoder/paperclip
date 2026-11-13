@@ -107,7 +107,7 @@ export const QUALIFIED_ACPX_PROFILES: Readonly<
     agentRuntimePackage: "@openai/codex",
     agentRuntimeVersion: "0.160.0",
     commandDigest:
-      "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+      "sha256:68fda4e34fae33ab680af094956f6a5f08f77047d59d33c68968d6ae2fc3e3c8",
     qualificationModel: "gpt-5.6-sol",
     reportedModelId: "gpt-5.6-sol",
     permissionPolicy: "interactive",

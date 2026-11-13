@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const PROFILE_DIGEST: &str =
-    "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3";
+    "sha256:68fda4e34fae33ab680af094956f6a5f08f77047d59d33c68968d6ae2fc3e3c8";
 
 struct Fixture(PathBuf);
 impl Drop for Fixture {

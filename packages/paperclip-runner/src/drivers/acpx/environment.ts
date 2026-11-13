@@ -110,6 +110,10 @@ export function createSanitizedAcpxSpawnInput(
     "RUST_BACKTRACE",
     "PAPERCLIP_NATIVE_MCP_NAME",
     "PAPERCLIP_NATIVE_MCP_URL",
+    // This is derived by the execution-target Git probe and only belongs on
+    // the explicitly supplied Codex ACP launch environment. Never inherit it
+    // from the runner process or expose it to another ACP harness.
+    ...(agent === "codex" && environment !== undefined ? ["PAPERCLIP_GIT_METADATA_ROOTS"] : []),
     ...credentialNames,
   ]);
   let retainedBytes = 0;

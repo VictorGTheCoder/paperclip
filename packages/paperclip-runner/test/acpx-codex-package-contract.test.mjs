@@ -83,9 +83,10 @@ test("the patched Codex ACP executable digest stays aligned across launch bounda
   const digest = profileMatch[1];
   const packagePath = createRequire(import.meta.url).resolve("@agentclientprotocol/codex-acp/package.json");
   const installed = JSON.parse(await readFile(packagePath, "utf8"));
-  const executable = await readFile(resolve(dirname(packagePath), installed.bin["codex-acp"]));
+  const candidateExecutable = process.env.PAPERCLIP_CODEX_ACP_CANDIDATE;
+  const executable = await readFile(candidateExecutable ?? resolve(dirname(packagePath), installed.bin["codex-acp"]));
   assert.equal(digest, `sha256:${createHash("sha256").update(executable).digest("hex")}`,
-    "the identity binds installed executable bytes, not the patch file");
+    "the identity binds selected executable bytes, not the patch file");
 
   assert.match(runnerdAcpxBackend, new RegExp(`"codex"[\\s\\S]*?${digest}`));
   assert.match(
@@ -213,6 +214,15 @@ test("the Codex patch enforces isolated instructions, tools, and skills", () => 
       new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     );
   }
+});
+
+test("Git metadata roots enter only Codex sandbox writable roots", () => {
+  assert.match(codexPatch, /PAPERCLIP_ACPX_GIT_METADATA_SCOPE/);
+  assert.match(codexPatch, /paperclipGitMetadataWritableRoots\(\)/);
+  assert.match(codexPatch, /mergeSandboxWorkspaceWriteRoots\(mergedConfig, \[\.\.\.additionalDirectories, \.\.\.paperclipGitMetadataWritableRoots\(\)\]\)/);
+  assert.match(codexPatch, /addAdditionalDirectoriesToSandboxPolicy\(paperclipSandboxPolicy\(agentMode\.sandboxPolicy\), \[\.\.\.additionalDirectories, \.\.\.paperclipGitMetadataWritableRoots\(\)\]\)/);
+  assert.doesNotMatch(codexPatch, /sessionRoots\s*=\s*\[[^\]]*paperclipGitMetadataWritableRoots/);
+  assert.doesNotMatch(codexPatch, /skillExtraRoots[^\n]*paperclipGitMetadataWritableRoots/);
 });
 
 test("the Codex patch keeps MCP tool approvals on the governed permission channel", () => {

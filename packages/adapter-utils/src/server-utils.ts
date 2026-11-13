@@ -168,7 +168,8 @@ export function isPaperclipRuntimeEnvKey(key: string): boolean {
 // Other PAPERCLIP_*-named config keys are allowed as long as Paperclip has
 // not assigned the same key for the run (runtime vars always win).
 export function isForbiddenConfigEnvKey(key: string): boolean {
-  return key === "PAPERCLIP_API_KEY" || key === "PAPERCLIP_WAKE_PAYLOAD_JSON";
+  return key === "PAPERCLIP_API_KEY" || key === "PAPERCLIP_WAKE_PAYLOAD_JSON"
+    || key === "PAPERCLIP_ACPX_GIT_METADATA_SCOPE";
 }
 const PAPERCLIP_SKILL_ROOT_RELATIVE_CANDIDATES = [
   "../../skills",
