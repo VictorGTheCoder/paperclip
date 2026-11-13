@@ -52,7 +52,7 @@ diff --git a/dist/index.js b/dist/index.js
 +// probe. They are writable only for Git metadata operations, never Codex project,
 +// trust, or skill discovery roots.
 +function paperclipGitMetadataWritableRoots() {
-+  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1") return [];
++  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1" && process.env.PAPERCLIP_ACPX_GIT_METADATA_SCOPE !== "1") return [];
 +  const source = process.env.PAPERCLIP_GIT_METADATA_ROOTS;
 +  if (typeof source !== "string" || !source || source.length > 16 * 1024) return [];
 +  try {

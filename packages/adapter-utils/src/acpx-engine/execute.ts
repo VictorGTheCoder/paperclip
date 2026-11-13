@@ -22,6 +22,7 @@ import {
   adapterExecutionTargetEnablesSandboxDuplexBridge,
   formatAdapterExecutionTimeoutErrorMessage,
   formatAdapterExecutionTimeoutStartLogLine,
+  prepareGitHubExecutionEnvironment,
   prepareAdapterExecutionTargetRuntime,
   readAdapterExecutionTarget,
   resolveAdapterExecutionTargetTimeout,
@@ -2028,6 +2029,40 @@ async function buildRuntime(input: {
     // them, but only hash actual adapter settings. User-supplied temp overrides
     // are absent from tempKeysApplied and keep their compatibility protection.
     if (!scratchKeys.has(key) || value !== scratch.dir) resolvedAdapterEnv[key] = value;
+  }
+  // Legacy codex_local ACP does not use paperclip_runner's isolated-context
+  // contract. Derive only Git metadata roots here, at the controller-owned
+  // execution-target boundary, then overwrite any configured root projection.
+  // The dedicated marker grants the Codex ACP patch permission to consume this
+  // bounded projection without enabling the native runner's skills/MCP/auth
+  // isolation behavior.
+  if (acpxAgent === "codex") {
+    delete env.PAPERCLIP_GIT_METADATA_ROOTS;
+    delete env.PAPERCLIP_ACPX_GIT_METADATA_SCOPE;
+    // Do not use runtimeConfig.cwd as a discovery root. It is an adapter
+    // setting; only a controller-resolved workspace cwd is admitted here.
+    if (effectiveWorkspaceCwd) {
+      const gitContext = await prepareGitHubExecutionEnvironment({
+        target: executionTarget,
+        cwd: effectiveExecutionCwd,
+        env: {},
+        hostCredentials: false,
+        networkAccess: false,
+      });
+      let roots: unknown;
+      try {
+        roots = JSON.parse(gitContext.PAPERCLIP_GIT_METADATA_ROOTS ?? "[]");
+      } catch {
+        roots = [];
+      }
+      const safeRoots = Array.isArray(roots)
+        ? roots.filter((root): root is string => typeof root === "string")
+        : [];
+      if (safeRoots.length > 0) {
+        env.PAPERCLIP_GIT_METADATA_ROOTS = JSON.stringify(safeRoots);
+        env.PAPERCLIP_ACPX_GIT_METADATA_SCOPE = "1";
+      }
+    }
   }
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
   // For the claude agent, set model via ANTHROPIC_MODEL at startup rather than

@@ -217,6 +217,7 @@ test("the Codex patch enforces isolated instructions, tools, and skills", () => 
 });
 
 test("Git metadata roots enter only Codex sandbox writable roots", () => {
+  assert.match(codexPatch, /PAPERCLIP_ACPX_GIT_METADATA_SCOPE/);
   assert.match(codexPatch, /paperclipGitMetadataWritableRoots\(\)/);
   assert.match(codexPatch, /mergeSandboxWorkspaceWriteRoots\(mergedConfig, \[\.\.\.additionalDirectories, \.\.\.paperclipGitMetadataWritableRoots\(\)\]\)/);
   assert.match(codexPatch, /addAdditionalDirectoriesToSandboxPolicy\(paperclipSandboxPolicy\(agentMode\.sandboxPolicy\), \[\.\.\.additionalDirectories, \.\.\.paperclipGitMetadataWritableRoots\(\)\]\)/);
