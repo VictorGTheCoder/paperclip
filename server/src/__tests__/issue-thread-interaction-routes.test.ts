@@ -49,6 +49,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   cancelRun: vi.fn(async () => null),
 }));
+const mockDeliverPendingInteractionWake = vi.hoisted(() => vi.fn(async (_interactionId: string) => undefined));
 const mockRequestNativeQuestionRunCancellation = vi.hoisted(() =>
   vi.fn(async () => null as string | null)
 );
@@ -159,6 +160,17 @@ vi.mock("../services/trust-preset-resolver.js", () => ({
 }));
 
 function registerModuleMocks() {
+  // The route hands pending delivery to the durable outbox; its DB-backed
+  // eligibility/replay semantics are exercised in interaction-wake-delivery.test.ts.
+  vi.doMock("../services/interaction-wake-delivery.js", () => ({
+    interactionWakeDeliveryService: () => ({ deliverPending: mockDeliverPendingInteractionWake }),
+  }));
+  // The continuation helper imports this service directly rather than via the
+  // service index mocked below. Use the same review-attention fixture in both.
+  vi.doMock("../services/issues.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../services/issues.js")>()),
+    issueService: () => mockIssueService,
+  }));
   vi.doMock("../services/question-response-delivery.js", () => ({
     questionResponseDeliveryService: () => mockQuestionResponseDeliveries,
   }));
@@ -644,7 +656,7 @@ describe("issue thread interaction routes", () => {
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
-  it("wakes the addressed agent when an interaction is created", async () => {
+  it("hands a newly created addressed interaction to durable wake delivery", async () => {
     mockInteractionService.create.mockResolvedValueOnce({
       id: "interaction-addressed",
       companyId: "company-1",
@@ -682,18 +694,9 @@ describe("issue thread interaction routes", () => {
       });
 
     expect(res.status).toBe(201);
-    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-      ASSIGNEE_AGENT_ID,
-      expect.objectContaining({
-        reason: "interaction_pending",
-        idempotencyKey: "interaction-pending:interaction-addressed",
-        payload: expect.objectContaining({
-          issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-          interactionId: "interaction-addressed",
-        }),
-        contextSnapshot: expect.objectContaining({ wakeReason: "interaction_pending" }),
-      }),
-    );
+    expect(mockDeliverPendingInteractionWake).toHaveBeenCalledExactlyOnceWith("interaction-addressed");
+    // The route must not bypass the durable admission fence with a second wake.
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("does not route agent attention for a human-only interaction", async () => {
