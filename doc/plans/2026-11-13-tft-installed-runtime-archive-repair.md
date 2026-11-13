@@ -65,3 +65,16 @@ the installed release. This preserves every job, permission, script and final
 aggregate gate instead of reducing coverage to make the PR pass. Review must
 reject any changed trusted workflow bytes unless separately authorized. A
 successful local check is not a claim that GitHub CI ran or passed.
+
+### Complete release-qualification fallback
+
+When GitHub has not scheduled the normal PR event, an authenticated operator may
+explicitly dispatch the registered `pr.yml` workflow on the candidate branch.
+That event runs the existing **complete `release-verify.yml`** against immutable
+`github.sha`, including typecheck, all general/serialized test shards, runner
+verification, chaos/recovery and full build. No arbitrary ref, secret elevation,
+publication, deployment or test waiver is permitted. The normal PR event still
+runs its full original trusted workflow. Record the actual manual workflow ID,
+exact source SHA, job outcomes and artifact provenance separately; zero runs or
+pending/failing jobs is never recorded as success. This is a full qualification
+path, not a fabricated required status or a replacement for independent review.

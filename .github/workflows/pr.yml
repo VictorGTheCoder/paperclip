@@ -5,6 +5,9 @@ on:
     # Preserve all original events and also run full CI when a reviewed draft
     # is promoted. This is not a manual pass or a reduction in test coverage.
     types: [opened, synchronize, reopened, ready_for_review]
+  # Explicit operator request; only verifies this workflow's exact source SHA.
+  # No publishing/deployment, arbitrary checkout input, or elevated token scope.
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -13,8 +16,15 @@ permissions:
 
 jobs:
   ci:
+    if: github.event_name == 'pull_request'
     # Repair-branch CI must execute the complete workflow of the installed
     # release, not mutable upstream master or an unavailable historical call.
     # The unmodified local full workflow has a pinned SHA-256 verified by tests;
     # no jobs, permissions or required aggregate checks are removed.
     uses: ./.github/workflows/pr-trusted.yml
+
+  release_qualification:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/release-verify.yml
+    with:
+      ref: ${{ github.sha }}

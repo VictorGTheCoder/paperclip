@@ -345,3 +345,11 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
     "the policy lockfile artifact chain must stay removed; it put the policy job on every lane's critical path",
   );
 });
+
+test("manual repair qualification uses the complete release suite on the event SHA", () => {
+  const caller = readFileSync(prCallerWorkflow, "utf8");
+  assert.match(caller, /^  workflow_dispatch:$/m);
+  assert.match(caller, /release_qualification:\n    if: github\.event_name == 'workflow_dispatch'\n    uses: \.\/\.github\/workflows\/release-verify\.yml\n    with:\n      ref: \$\{\{ github\.sha \}\}/);
+  assert.doesNotMatch(caller, /secrets: inherit|contents: write|id-token: write|continue-on-error/);
+  assert.match(caller, /ci:\n    if: github\.event_name == 'pull_request'/);
+});
