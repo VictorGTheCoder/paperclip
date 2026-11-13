@@ -114,11 +114,11 @@ async function hasUnsettledLinkedRunForWorkspace(
       -- that this callback stopped, so keep this fence until an audited recovery
       -- action records a terminal operation. No successful child/recovery
       -- receipt can release a possibly-live outer finalizer.
+      -- These operation rows survive deletion of their run/agent via SET NULL.
+      -- Losing their owner must not erase a workspace-specific archive hold.
       OR EXISTS (
         SELECT 1 FROM ${workspaceOperations} active_finalize
-        JOIN ${heartbeatRuns} active_run
-          ON active_run.id = active_finalize.heartbeat_run_id
-          AND active_run.company_id = active_finalize.company_id
+
         WHERE active_finalize.company_id = ${workspace.companyId}
           AND active_finalize.phase = 'workspace_finalize'
           AND active_finalize.status = 'running'
@@ -133,9 +133,7 @@ async function hasUnsettledLinkedRunForWorkspace(
       OR (
         EXISTS (
           SELECT 1 FROM ${workspaceOperations} inspected
-          JOIN ${heartbeatRuns} inspected_run
-            ON inspected_run.id = inspected.heartbeat_run_id
-            AND inspected_run.company_id = inspected.company_id
+
           WHERE inspected.company_id = ${workspace.companyId}
             AND inspected.phase IN ('worktree_prepare', 'workspace_finalize')
             AND (inspected.execution_workspace_id = ${workspace.id}
@@ -145,9 +143,7 @@ async function hasUnsettledLinkedRunForWorkspace(
         AND COALESCE((
           SELECT final_operation.status
           FROM ${workspaceOperations} final_operation
-          JOIN ${heartbeatRuns} final_run
-            ON final_run.id = final_operation.heartbeat_run_id
-            AND final_run.company_id = final_operation.company_id
+
           WHERE final_operation.company_id = ${workspace.companyId}
             AND final_operation.phase = 'workspace_finalize'
             AND (final_operation.execution_workspace_id = ${workspace.id}
@@ -159,9 +155,7 @@ async function hasUnsettledLinkedRunForWorkspace(
             AND final_operation.started_at > COALESCE((
               SELECT coalesce(preparation.finished_at, preparation.started_at, preparation.created_at)
               FROM ${workspaceOperations} preparation
-              JOIN ${heartbeatRuns} preparation_run
-                ON preparation_run.id = preparation.heartbeat_run_id
-                AND preparation_run.company_id = preparation.company_id
+
               WHERE preparation.company_id = ${workspace.companyId}
                 AND preparation.phase = 'worktree_prepare'
                 AND (preparation.execution_workspace_id = ${workspace.id}

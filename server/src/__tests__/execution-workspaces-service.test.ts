@@ -645,6 +645,36 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     }))?.outcome).toBe("archived");
   });
 
+  it.each([
+    ["workspace_finalize", "running"],
+    ["workspace_finalize", "failed"],
+    ["worktree_prepare", "succeeded"],
+  ] as const)("retains %s/%s archive holds if agent deletion removes the owning run", async (phase, status) => {
+    const seeded = await seedTerminalWorkspace({ mergedPr: true });
+    const agentId = randomUUID(), runId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId: seeded.companyId, name: "Deleted run owner",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId: seeded.companyId, agentId,
+      status: "failed", runtimeMode: "legacy", contextSnapshot: { issueId: seeded.sourceIssueId },
+    });
+    const [operation] = await db.insert(workspaceOperations).values({
+      companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId,
+      issueId: seeded.sourceIssueId, heartbeatRunId: runId, phase, status,
+      finishedAt: status === "running" ? null : new Date(),
+    }).returning();
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const remaining = await db.select().from(workspaceOperations).where(eq(workspaceOperations.id, operation.id));
+    expect(remaining[0]?.heartbeatRunId).toBeNull();
+    expect((await svc.getCloseReadiness(seeded.executionWorkspaceId))?.isDestructiveCloseAllowed).toBe(false);
+    expect((await svc.archiveWorkspaceUnderLifecycleLock({
+      id: seeded.executionWorkspaceId, patch: {}, closedAt: new Date(),
+    }))?.outcome).toBe("finalizing");
+    await fs.access(seeded.worktreePath);
+  });
+
   it("reports a squash cross-branch delivery as merged_via_pr and suppresses the ancestry warning", async () => {
     const repoRoot = await createTempRepo();
     tempDirs.add(repoRoot);

@@ -37,7 +37,9 @@ proof is invented: abandoned operations need an audited recovery disposition.
 The old PR wrapper calls mutable upstream `master`, which now expects source
 files absent from this release. Pin the same full trusted workflow at the exact
 reviewed installed-source commit in this fork. The checked-in trusted workflow
-itself is unmodified. The pin regression preserves aggregate verification and
+itself is unmodified. Its original upstream release commit `bba6a45f0d364cfd962ac59b3bdf2426a8222adb`
+contains the identical workflow bytes (Git blob `b87e5115b9cfbf616fd26784dd0a7430002d9ece`);
+the caller pins that upstream immutable release rather than the mutable master. The pin regression preserves aggregate verification and
 end-to-end gates. No tests, branch protections or reviewer requirements are
 removed or changed to `continue-on-error`.
 

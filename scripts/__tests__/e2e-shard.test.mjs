@@ -29,7 +29,7 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: VictorGTheCoder\/paperclip\/\.github\/workflows\/pr-trusted\.yml@82eef2bca238c3f9362e965b20a8b030244e8f41\s*$/m,
+    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@bba6a45f0d364cfd962ac59b3bdf2426a8222adb\s*$/m,
     "pr.yml must call the immutable reviewed workflow matching the installed release",
   );
   // Validate proposed workflow changes locally; CI executes the merged master version.

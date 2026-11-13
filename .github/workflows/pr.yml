@@ -14,4 +14,4 @@ jobs:
     # independently reviewable workflow shipped with that exact source, not
     # mutable upstream master (which references unavailable newer scripts).
     # The same full checks/aggregate names remain required; no skip/override.
-    uses: VictorGTheCoder/paperclip/.github/workflows/pr-trusted.yml@82eef2bca238c3f9362e965b20a8b030244e8f41
+    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@bba6a45f0d364cfd962ac59b3bdf2426a8222adb
