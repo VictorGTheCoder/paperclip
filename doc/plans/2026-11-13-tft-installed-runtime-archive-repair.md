@@ -53,3 +53,15 @@ install/symlink mechanism only with a rollback receipt. Verify API health and an
 actual worktree-finalization/archival probe before enabling cleanup. The automatic
 cleanup timer remains disabled until that runtime evidence exists. Never directly
 edit the original dirty canonical source or production database to fake success.
+
+### Bounded CI trigger repair
+
+Two reviewed historical reusable-workflow references (the fork source and the
+byte-identical upstream release) produced no Actions run/check suite for this
+PR, including one bounded native reopen event replay. The cause is not proven.
+The repair branch now invokes its own **unchanged complete trusted workflow**,
+with an explicit SHA-256 assertion (`53033201...c73d`) proving byte identity with
+the installed release. This preserves every job, permission, script and final
+aggregate gate instead of reducing coverage to make the PR pass. Review must
+reject any changed trusted workflow bytes unless separately authorized. A
+successful local check is not a claim that GitHub CI ran or passed.

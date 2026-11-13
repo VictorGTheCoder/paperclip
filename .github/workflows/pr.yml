@@ -10,8 +10,8 @@ permissions:
 
 jobs:
   ci:
-    # This repair branch targets the installed 2026.1012.0 runtime. Execute the
-    # independently reviewable workflow shipped with that exact source, not
-    # mutable upstream master (which references unavailable newer scripts).
-    # The same full checks/aggregate names remain required; no skip/override.
-    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@bba6a45f0d364cfd962ac59b3bdf2426a8222adb
+    # Repair-branch CI must execute the complete workflow of the installed
+    # release, not mutable upstream master or an unavailable historical call.
+    # The unmodified local full workflow has a pinned SHA-256 verified by tests;
+    # no jobs, permissions or required aggregate checks are removed.
+    uses: ./.github/workflows/pr-trusted.yml

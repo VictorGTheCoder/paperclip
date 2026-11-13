@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,11 +30,15 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@bba6a45f0d364cfd962ac59b3bdf2426a8222adb\s*$/m,
-    "pr.yml must call the immutable reviewed workflow matching the installed release",
+    /^\s+uses: \.\/\.github\/workflows\/pr-trusted\.yml\s*$/m,
+    "pr.yml must call the full version-compatible workflow from this exact revision",
   );
-  // Validate proposed workflow changes locally; CI executes the merged master version.
-  return readFileSync(trustedPrWorkflow, "utf8");
+  const trusted = readFileSync(trustedPrWorkflow, "utf8");
+  // All jobs, scripts, permissions and aggregate gates remain byte-identical
+  // to the independently reviewed installed release's trusted workflow.
+  assert.equal(createHash("sha256").update(trusted).digest("hex"),
+    "53033201b446d70bc1494d57fa728ecf4afe0378defeba18856b54bbc448c73d");
+  return trusted;
 }
 
 function readWorkflowJobs(workflow) {
