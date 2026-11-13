@@ -424,6 +424,24 @@ describe("execution workspace routes", () => {
     }));
   });
 
+  it("returns 409 without destructive side effects if run finalization races with archive", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      id: "workspace-1", companyId: "company-1", sourceIssueId: "issue-1",
+      status: "active", mode: "isolated_workspace",
+    });
+    mockExecutionWorkspaceService.getCloseReadiness.mockResolvedValue({
+      state: "ready", blockingReasons: [],
+    });
+    mockExecutionWorkspaceService.archiveWorkspaceUnderLifecycleLock.mockResolvedValue({ outcome: "finalizing" });
+    const res = await request(createApp())
+      .patch("/api/execution-workspaces/workspace-1")
+      .send({ status: "archived" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("still finalizing");
+    expect(mockExecutionWorkspaceService.fenceClosedWorkspaceDestruction).not.toHaveBeenCalled();
+    expect(mockEnvironmentRuntimeService.destroyReusableSandboxLeases).not.toHaveBeenCalled();
+  });
+
   it("returns 409 and skips destructive cleanup when the archive hits a reopen-pending workspace", async () => {
     // A reopen published the workspace active while its source issue is still
     // terminal. The archive control must return 409 before any lease teardown,

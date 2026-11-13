@@ -14,6 +14,7 @@ import {
   issues,
   projects,
   projectWorkspaces,
+  workspaceOperations,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
 import type {
@@ -69,6 +70,117 @@ type RuntimeServiceReadDb = Pick<Db, "select">;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const execFileAsync = promisify(execFile);
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
+
+// Terminal issue status is not proof that its finalizer has stopped using Git.
+// This targets the installed 2026.1012.0 schema and preserves both publication
+// and lifecycle-lock fences; it does not depend on newer native runtime tables.
+async function hasUnsettledLinkedRunForWorkspace(
+  reader: Db | DbTransaction,
+  workspace: Pick<ExecutionWorkspaceRow, "companyId" | "id" | "sourceIssueId">,
+): Promise<boolean> {
+  const rows = await reader.execute<{ pending: boolean }>(sql`
+    WITH RECURSIVE linked_issue(id) AS (
+      SELECT root.id FROM ${issues} root
+      WHERE root.company_id = ${workspace.companyId}
+        AND (root.execution_workspace_id = ${workspace.id}
+          OR root.id = ${workspace.sourceIssueId})
+      UNION
+      SELECT child.id FROM ${issues} child
+      JOIN linked_issue parent ON child.parent_id = parent.id
+      WHERE child.company_id = ${workspace.companyId}
+    )
+    SELECT (
+      EXISTS (
+        SELECT 1 FROM ${heartbeatRuns} run
+        WHERE run.company_id = ${workspace.companyId}
+          AND (
+            run.native_issue_id IN (SELECT id FROM linked_issue)
+            OR nullif(run.context_snapshot->>'issueId', '') IN (SELECT id::text FROM linked_issue)
+            OR nullif(run.context_snapshot->>'taskId', '') IN (SELECT id::text FROM linked_issue)
+            OR EXISTS (
+              SELECT 1 FROM ${workspaceOperations} operation
+              WHERE operation.company_id = ${workspace.companyId}
+                AND operation.heartbeat_run_id = run.id
+                AND (operation.execution_workspace_id = ${workspace.id}
+                  OR operation.issue_id IN (SELECT id FROM linked_issue))
+            )
+          )
+          AND run.status IN ('queued', 'running')
+      )
+      -- A nested branch reconciliation can emit a succeeded operation while
+      -- the enclosing ACP workspace_finalize callback is STILL running.
+      -- Legacy workspace operations have no durable callback owner or lease. A
+      -- terminal heartbeat run (or its expired controller lease) cannot prove
+      -- that this callback stopped, so keep this fence until an audited recovery
+      -- action records a terminal operation. No successful child/recovery
+      -- receipt can release a possibly-live outer finalizer.
+      OR EXISTS (
+        SELECT 1 FROM ${workspaceOperations} active_finalize
+        JOIN ${heartbeatRuns} active_run
+          ON active_run.id = active_finalize.heartbeat_run_id
+          AND active_run.company_id = active_finalize.company_id
+        WHERE active_finalize.company_id = ${workspace.companyId}
+          AND active_finalize.phase = 'workspace_finalize'
+          AND active_finalize.status = 'running'
+          AND (active_finalize.execution_workspace_id = ${workspace.id}
+            OR (active_finalize.execution_workspace_id IS NULL
+              AND active_finalize.issue_id IN (SELECT id FROM linked_issue)))
+      )
+      -- A failed historical attempt may be superseded by a later successful
+      -- revalidation of this same worktree (including a new retry run ID).
+      -- Rank terminal operations by when they actually FINISHED, rather than
+      -- created_at: an outer failure can finish after a nested success.
+      OR (
+        EXISTS (
+          SELECT 1 FROM ${workspaceOperations} inspected
+          JOIN ${heartbeatRuns} inspected_run
+            ON inspected_run.id = inspected.heartbeat_run_id
+            AND inspected_run.company_id = inspected.company_id
+          WHERE inspected.company_id = ${workspace.companyId}
+            AND inspected.phase IN ('worktree_prepare', 'workspace_finalize')
+            AND (inspected.execution_workspace_id = ${workspace.id}
+              OR (inspected.execution_workspace_id IS NULL
+                AND inspected.issue_id IN (SELECT id FROM linked_issue)))
+        )
+        AND COALESCE((
+          SELECT final_operation.status
+          FROM ${workspaceOperations} final_operation
+          JOIN ${heartbeatRuns} final_run
+            ON final_run.id = final_operation.heartbeat_run_id
+            AND final_run.company_id = final_operation.company_id
+          WHERE final_operation.company_id = ${workspace.companyId}
+            AND final_operation.phase = 'workspace_finalize'
+            AND (final_operation.execution_workspace_id = ${workspace.id}
+              OR (final_operation.execution_workspace_id IS NULL
+                AND final_operation.issue_id IN (SELECT id FROM linked_issue)))
+            -- A prior checkout validation cannot certify a checkout prepared
+            -- afterwards. Require the latest finalizer to have started after
+            -- the latest preparation completed (or began, if still running).
+            AND final_operation.started_at > COALESCE((
+              SELECT coalesce(preparation.finished_at, preparation.started_at, preparation.created_at)
+              FROM ${workspaceOperations} preparation
+              JOIN ${heartbeatRuns} preparation_run
+                ON preparation_run.id = preparation.heartbeat_run_id
+                AND preparation_run.company_id = preparation.company_id
+              WHERE preparation.company_id = ${workspace.companyId}
+                AND preparation.phase = 'worktree_prepare'
+                AND (preparation.execution_workspace_id = ${workspace.id}
+                  OR (preparation.execution_workspace_id IS NULL
+                    AND preparation.issue_id IN (SELECT id FROM linked_issue)))
+              ORDER BY coalesce(preparation.finished_at, preparation.started_at, preparation.created_at) DESC,
+                preparation.created_at DESC, preparation.id DESC
+              LIMIT 1
+            ), '-infinity'::timestamptz)
+          ORDER BY coalesce(final_operation.finished_at, final_operation.created_at) DESC,
+            final_operation.created_at DESC, final_operation.id DESC
+          LIMIT 1
+        ), 'pending') <> 'succeeded'
+      )
+    ) AS pending
+  `);
+  return rows[0]?.pending === true;
+}
+
 
 // Return the timestamp when an issue became terminal. A `done` issue uses
 // `completedAt`. A `cancelled` issue uses `cancelledAt`. The reaper cooldown
@@ -2340,6 +2452,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       const { deliveryState } = await assessDelivery(workspace, git);
       const warnings = [...gitWarnings];
       const blockingReasons: string[] = [];
+      if (await hasUnsettledLinkedRunForWorkspace(db, workspace)) {
+        blockingReasons.push("A linked agent run is still finalizing this workspace; finish its workspace validation before archiving.");
+      }
       if (!statusInspectionSucceeded) {
         blockingReasons.push("Paperclip could not verify the workspace git status. Retry before destructive cleanup.");
       }
@@ -2742,6 +2857,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // lock, so it never archives a workspace that a reopen just restored.
         const archived = await db.transaction(async (tx) => {
           await acquireExecutionWorkspaceLifecycleLock(tx, workspace.id);
+          if (await hasUnsettledLinkedRunForWorkspace(tx, workspace)) return null;
           return tx
             .update(executionWorkspaces)
             .set({
@@ -3254,6 +3370,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     }): Promise<
       | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
       | { outcome: "reopen_pending" }
+      | { outcome: "finalizing" }
       | null
     > => {
       return db.transaction(async (tx) => {
@@ -3267,6 +3384,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           // The row is missing or already closed by a concurrent path. Do not
           // archive again.
           return null;
+        }
+        if (await hasUnsettledLinkedRunForWorkspace(tx, fresh)) {
+          return { outcome: "finalizing" };
         }
         if (metadataHasReopenPendingConsumption(fresh.metadata as Record<string, unknown> | null)) {
           // A reopen published this row as active while its source issue is still
