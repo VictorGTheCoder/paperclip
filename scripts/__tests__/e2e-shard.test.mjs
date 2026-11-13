@@ -28,6 +28,7 @@ function runShard(args) {
 
 function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
+  assert.match(caller, /types: \[opened, synchronize, reopened, ready_for_review\]/);
   assert.match(
     caller,
     /^\s+uses: \.\/\.github\/workflows\/pr-trusted\.yml\s*$/m,

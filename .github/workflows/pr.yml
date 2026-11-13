@@ -2,6 +2,9 @@ name: PR
 
 on:
   pull_request:
+    # Preserve all original events and also run full CI when a reviewed draft
+    # is promoted. This is not a manual pass or a reduction in test coverage.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   actions: read
