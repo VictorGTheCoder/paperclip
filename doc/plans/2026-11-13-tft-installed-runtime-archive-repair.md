@@ -54,27 +54,23 @@ actual worktree-finalization/archival probe before enabling cleanup. The automat
 cleanup timer remains disabled until that runtime evidence exists. Never directly
 edit the original dirty canonical source or production database to fake success.
 
-### Bounded CI trigger repair
+### Confirmed external CI admission blocker (not workflow-code failure)
 
-Two reviewed historical reusable-workflow references (the fork source and the
-byte-identical upstream release) produced no Actions run/check suite for this
-PR, including one bounded native reopen event replay. The cause is not proven.
-The repair branch now invokes its own **unchanged complete trusted workflow**,
-with an explicit SHA-256 assertion (`53033201...c73d`) proving byte identity with
-the installed release. This preserves every job, permission, script and final
-aggregate gate instead of reducing coverage to make the PR pass. Review must
-reject any changed trusted workflow bytes unless separately authorized. A
-successful local check is not a claim that GitHub CI ran or passed.
+GitHub refuses dispatch with HTTP422 "Actions has been disabled for this
+repository" even though native repository/workflow settings read enabled/active.
+The repository has no queued/live Actions jobs. Native re-enable and one idle-only
+reinitialize attempt returned the same rejection with policy unchanged. GitHub's
+official documentation identifies a separate GitHub-controlled disabled state
+that repository settings cannot clear; support review is required.
 
-### Complete release-qualification fallback
+The temporary local-workflow/manual-dispatch diagnostic entry points have been
+**reverted**. The final caller still invokes an externally trusted **immutable
+upstream release SHA**, never a PR-editable local trusted workflow. Every original
+permission, job, required aggregate and trigger contract is preserved. Source
+review/local tests are not fabricated CI, and the runtime cannot be claimed fully
+qualified/deployed until the original full remote gates execute successfully.
 
-When GitHub has not scheduled the normal PR event, an authenticated operator may
-explicitly dispatch the registered `pr.yml` workflow on the candidate branch.
-That event runs the existing **complete `release-verify.yml`** against immutable
-`github.sha`, including typecheck, all general/serialized test shards, runner
-verification, chaos/recovery and full build. No arbitrary ref, secret elevation,
-publication, deployment or test waiver is permitted. The normal PR event still
-runs its full original trusted workflow. Record the actual manual workflow ID,
-exact source SHA, job outcomes and artifact provenance separately; zero runs or
-pending/failing jobs is never recorded as success. This is a full qualification
-path, not a fabricated required status or a replacement for independent review.
+Evidence and private native API receipt are recorded in
+`/mnt/wd4tb/tft-project-reset-evidence-20261113/` on the operator host; these files
+contain no credentials and must not be confused with a passing workflow run.
+See official GitHub documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
