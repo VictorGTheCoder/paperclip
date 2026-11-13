@@ -116,3 +116,22 @@ rerun. Preserve the earlier logs as load-sensitive evidence, not a first-pass
 success claim. The exact candidate package contract also passed **11/11**.
 No new runtime qualification, live deployment, API key, permission, sandbox
 mode, or GitHub CI success is implied by these source tests.
+
+
+## Repository-selection environment is not permission authority
+
+The metadata discovery subprocess must not inherit `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_COMMON_DIR`, or Git configuration/index overrides from the controller or
+target shell. Those variables can redirect `git rev-parse` to an unrelated
+repository while still reporting the admitted working directory. The local
+probe now removes `GIT_*` overrides from its Git child environment; the remote
+shell uses the same isolated child-only policy. Ordinary caller/target
+environment, host-credential capture, and managed/host authentication policy
+remain unchanged.
+
+Three real-Git regressions reproduced the escape before the fix (local managed
+and host-credential modes with a genuine linked worktree; remote target shell).
+Afterward the full environment suite passes **24/24**, full ACP executor
+**213/213**, and exact package contract **11/11**. These tests validate the
+controller boundary and known package artifact, not a deployed service or
+completed hosted CI.
