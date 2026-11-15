@@ -10,7 +10,10 @@ export function projectToolDefinitions(workMode: string, includeTask = false) {
     && tool.allowedModes.includes(workMode as "standard"),
   ).map(tool => ({ name: tool.operationId, description: tool.description,
     inputSchema: tool.operationId === "create_project"
-      ? z.toJSONSchema(createProjectSchema.extend({ idempotencyKey: z.string().min(1).max(255) }))
+      // Use the schema owner's converter. Published server/shared packages can
+      // resolve different Zod minor versions; a foreign converter cannot safely
+      // traverse the shared schema's records (tools/list then fails with 500).
+      ? createProjectSchema.required({ idempotencyKey: true }).toJSONSchema()
       : tool.inputSchema,
   }));
 }

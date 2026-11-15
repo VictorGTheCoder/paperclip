@@ -43,3 +43,14 @@ concurrent requests and replay after controller reconstruction. Reusing the key
 for another intention returns a conflict. A terminal run is not automatically
 re-executed; failures still require their supported recovery path. This is not a
 global idempotency change for unrelated wake kinds.
+
+### Project MCP schema compatibility
+
+Project discovery serializes the shared creation schema with its own Zod
+converter. The installed server and shared package may resolve different Zod
+minor versions; extending the shared schema with a foreign schema and using a
+foreign converter can make `tools/list` fail on nested record fields. The
+idempotency key remains required with the shared validator's existing bounds.
+Qualification must include discovery using the installed dependency graph and
+a non-mutating project tool call; health and initialization alone do not prove
+tool discovery works.

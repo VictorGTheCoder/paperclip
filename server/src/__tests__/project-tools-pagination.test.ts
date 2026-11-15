@@ -9,6 +9,14 @@ const input = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("project discovery result bounds", () => {
+  it("publishes creation schemas with a required idempotency key and nested record fields", () => {
+    const tool = projectToolDefinitions("standard", true).find(t => t.name === "create_project")!;
+    expect(tool.inputSchema).toMatchObject({ type: "object", required: expect.arrayContaining(["name", "idempotencyKey"]),
+      properties: { env: expect.any(Object), executionWorkspacePolicy: expect.any(Object),
+        idempotencyKey: expect.objectContaining({ type: "string", minLength: 1, maxLength: 255 }) } });
+    expect(() => JSON.stringify(tool.inputSchema)).not.toThrow();
+  });
+
   it("requests bounded summaries and normalizes continuation cursors", async () => {
     const page = { projects: [{ id: "abcdefab-0000-4000-8000-000000000001", name: "Project", status: "in_progress", description: "Summary", descriptionTruncated: true }], nextCursor: "abcdefab-0000-4000-8000-000000000001" };
     const fetch = vi.fn(async (_url: string, _options: RequestInit) => ({ ok: true, json: async () => page }));
