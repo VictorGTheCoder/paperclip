@@ -24,6 +24,7 @@ import {
   issueDocuments,
   issueRelations,
   issueRecoveryActions,
+  issueThreadInteractions,
   issueTreeHolds,
   issues,
   nativeRunFinalizations,
@@ -35,6 +36,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../../../__tests__/helpers/embedded-postgres.js";
 import { createPostgresRunDispatchAdapter } from "./postgres.js";
+import { enrichWakeContextSnapshot } from "../../../services/heartbeat/run-preparation.js";
 import { settleUnrecoverableExecutions } from "../../../services/execution-recovery-resolution.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { projectTaskInterruption } from "../../../services/task-interruption-presentation.js";
@@ -70,6 +72,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(issueThreadInteractions);
     await db.delete(budgetIncidents);
     await db.delete(approvals);
     await db.delete(budgetPolicies);
@@ -180,6 +183,72 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     });
     return runId;
   }
+
+  it("dispatches only a current addressed question respondent without changing the task owner", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const workerId = randomUUID();
+    await seedAgent({ id: workerId, companyId, name: "Worker" });
+    const issueId = randomUUID();
+    await seedIssue({ companyId, issueId, status: "in_review", assigneeAgentId: workerId });
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId,
+      kind: "ask_user_questions", createdByAgentId: workerId, addresseeAgentId: agentId,
+      effectiveResolverPolicy: "not_creator", payload: { version: 1 } }).returning();
+    // Use the actual public-wake context normalization, then rehydrate from
+    // persisted JSON as a fresh controller does after a queue wait/restart.
+    const contextSnapshot = JSON.parse(JSON.stringify(enrichWakeContextSnapshot({
+      contextSnapshot: {}, reason: "interaction_response_requested", source: "on_demand",
+      triggerDetail: "manual", payload: { issueId, interactionId: card.id },
+    }).contextSnapshot));
+    expect(contextSnapshot.interactionId).toBe(card.id);
+    const restoredContext = enrichWakeContextSnapshot({
+      contextSnapshot: JSON.parse(JSON.stringify(contextSnapshot)), reason: "interaction_response_requested",
+      source: "automation", triggerDetail: "system", payload: { issueId },
+    }).contextSnapshot;
+    expect(restoredContext.interactionId).toBe(card.id);
+    const adapter = createPostgresRunDispatchAdapter(db);
+    const runId = await seedRun({ companyId, agentId, contextSnapshot });
+    expect(await adapter.cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "not_stale" });
+    const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(task).toMatchObject({ status: "in_review", assigneeAgentId: workerId, executionRunId: null });
+    // A second controller checks the same durable intent without creating work.
+    const replay = createPostgresRunDispatchAdapter(db);
+    expect(await replay.cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "not_stale" });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+    // Exact correlation is mandatory: another pending card cannot authorize this request.
+    for (const interactionId of [undefined, "bad-id", randomUUID()]) {
+      const invalid = await seedRun({ companyId, agentId,
+        contextSnapshot: { ...contextSnapshot, interactionId } });
+      expect(await replay.cancelStaleQueuedRun({ companyId, runId: invalid, expectedStatus: "queued", now: new Date() }))
+        .toMatchObject({ outcome: "cancelled", errorCode: "issue_assignee_changed" });
+    }
+    const wrongReason = await seedRun({ companyId, agentId,
+      contextSnapshot: { ...contextSnapshot, wakeReason: "issue_assigned" } });
+    expect(await replay.cancelStaleQueuedRun({ companyId, runId: wrongReason, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "cancelled", errorCode: "issue_assignee_changed" });
+    const otherIssueId = randomUUID();
+    await seedIssue({ companyId, issueId: otherIssueId, status: "in_review", assigneeAgentId: workerId });
+    const otherIssue = await seedRun({ companyId, agentId,
+      contextSnapshot: { ...contextSnapshot, issueId: otherIssueId } });
+    expect(await replay.cancelStaleQueuedRun({ companyId, runId: otherIssue, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "cancelled", errorCode: "issue_assignee_changed" });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+    const terminal = await seedRun({ companyId, agentId, contextSnapshot });
+    expect(await replay.cancelStaleQueuedRun({ companyId, runId: terminal, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "cancelled", errorCode: "issue_terminal_status" });
+    await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
+    // A resolved card, a changed addressee, or a human-only policy revokes the
+    // exception; a caller-supplied wake label cannot retain it.
+    for (const patch of [{ status: "answered" }, { status: "pending", addresseeAgentId: workerId },
+      { addresseeAgentId: agentId, effectiveResolverPolicy: "human_only" },
+      { effectiveResolverPolicy: "not_creator", kind: "request_confirmation" }]) {
+      await db.update(issueThreadInteractions).set(patch).where(eq(issueThreadInteractions.id, card.id));
+      const next = await seedRun({ companyId, agentId, contextSnapshot });
+      expect(await adapter.cancelStaleQueuedRun({ companyId, runId: next, expectedStatus: "queued", now: new Date() }))
+        .toMatchObject({ outcome: "cancelled", errorCode: "issue_assignee_changed" });
+    }
+  });
 
   async function seedCleanupRetry(status: "scheduled_retry" | "queued" = "scheduled_retry") {
     const { companyId, agentId } = await seedCompanyAndAgent();

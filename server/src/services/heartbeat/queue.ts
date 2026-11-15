@@ -3780,6 +3780,33 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "skipped" as const };
           }
 
+          // A respondent request is one durable intention, even when a board
+          // replay arrives while its first run is active. Keep the lookup under
+          // the existing issue admission lock, before creating a deferred wake.
+          if (reason === "interaction_response_requested" && opts.idempotencyKey && !executionWaitRequestId) {
+            const [saved] = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+            )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1);
+            if (saved) {
+              const savedContext = parseObject(saved.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
+              if ((readNonEmptyString(savedContext.wakeReason) ?? saved.reason) !== reason ||
+                  (readNonEmptyString(savedContext.issueId) ?? readNonEmptyString(saved.payload?.issueId)) !== issue.id ||
+                  saved.payload?.interactionId !== payload?.interactionId ||
+                  saved.requestedByActorType !== (opts.requestedByActorType ?? null) ||
+                  saved.requestedByActorId !== (opts.requestedByActorId ?? null)) {
+                throw conflict("The response idempotency key belongs to another intention.", {
+                  code: "interaction_response_idempotency_conflict",
+                });
+              }
+              const [recorded] = saved.runId ? await tx.select().from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.agentId, agentId),
+                eq(heartbeatRuns.id, saved.runId),
+              )).limit(1) : [];
+              return recorded ? { kind: "replayed" as const, run: recorded } : { kind: "deferred" as const };
+            }
+          }
+
           // Completion can settle the conversation while admission is outside
           // the issue lock. Recheck the current state before persisting a wake.
           if (isWaitingConversation(issue) && !hasIndependentConversationWakeCause()) {

@@ -242,6 +242,78 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     return { companyId, agentId };
   }
 
+  it.each([false, true])("runs an exact addressed question response once without taking worker ownership (deferred=%s)", async deferred => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentRole: "ceo" });
+    const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer",
+      status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    }).returning();
+    const [issue] = await db.insert(issues).values({ companyId, title: "Worker needs addressed answer",
+      status: "in_review", assigneeAgentId: worker.id }).returning();
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", status: "pending", createdByAgentId: worker.id,
+      addresseeAgentId: agentId, effectiveResolverPolicy: "not_creator",
+      payload: { version: 1, questions: [{ id: "source", prompt: "Confirm the source revision",
+        selectionMode: "single", required: true, allowOther: true,
+        options: [{ id: "answer", label: "Answer", freeText: true }] }] },
+    }).returning();
+    const options = { source: "on_demand" as const, triggerDetail: "manual" as const,
+      reason: "interaction_response_requested", idempotencyKey: `respond:${card.id}`,
+      requestedByActorType: "user" as const, requestedByActorId: "responsible-user", manualUserWake: true,
+      payload: { issueId: issue.id, interactionId: card.id } };
+    if (deferred) {
+      const [saved] = await db.insert(agentWakeupRequests).values({ companyId, agentId,
+        source: options.source, triggerDetail: options.triggerDetail, reason: "issue_execution_deferred",
+        status: "deferred_issue_execution", idempotencyKey: options.idempotencyKey,
+        requestedByActorType: options.requestedByActorType, requestedByActorId: options.requestedByActorId,
+        payload: { ...options.payload, _paperclipWakeContext: { issueId: issue.id,
+          interactionId: card.id, wakeReason: options.reason } },
+      }).returning();
+      expect(await heartbeat.wakeup(agentId, options)).toBeNull();
+      const receipts = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, options.idempotencyKey));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({ id: saved.id, status: "deferred_issue_execution", runId: null });
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(0);
+      // Release only this unstarted fixture before suite teardown.
+      await db.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, saved.id));
+      return;
+    }
+    const [first, replay] = await Promise.all([
+      heartbeat.wakeup(agentId, options), heartbeat.wakeup(agentId, options),
+    ]);
+    expect(first).toBeTruthy();
+    // An idempotent replay may return the run or no new admission. The
+    // persisted receipt and provider count below are the authoritative proof.
+    if (replay) expect(replay.id).toBe(first!.id);
+    await vi.waitFor(async () => {
+      const current = await heartbeat.getRun(first!.id);
+      expect(countExecuteCallsForRun(first!.id), JSON.stringify(current)).toBe(1);
+    }, { timeout: 10_000 });
+    await heartbeat.waitForRunExecutionDrain(first!.id);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    // Rebuild the controller and replay the persisted intention after completion.
+    const recovered = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+    expect((await recovered.wakeup(agentId, options))?.id).toBe(first!.id);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    await expect(recovered.wakeup(agentId, { ...options,
+      payload: { ...options.payload, interactionId: randomUUID() } }))
+      .rejects.toMatchObject({ status: 409 });
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs, JSON.stringify(runs.map(run => ({ id: run.id, status: run.status,
+      errorCode: run.errorCode, reason: run.contextSnapshot?.wakeReason })))).toHaveLength(1);
+    const receipts = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.idempotencyKey, options.idempotencyKey));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].runId).toBe(first!.id);
+    const [task] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(task.assigneeAgentId).toBe(worker.id);
+    const [savedCard] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+    // A mocked provider start is not an answer or completion certificate.
+    expect(savedCard.status).toBe("pending");
+  });
+
   it.each(["legacy", "native"])("delivers an accepted non-assignee queue after its %s owner finished", async runtimeMode => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const [recipient] = await db.insert(agents).values({ companyId, name: "Saved feedback recipient", role: "engineer",

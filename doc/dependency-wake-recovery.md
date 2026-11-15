@@ -24,3 +24,22 @@ Cancelling a run or pausing its agent suppresses immediate stranded-work recover
 A queued user message remains a separate continuation request. The release path
 still preserves independently authorized deferred input; stopping the old run
 does not discard that input or grant permission to replay its old tools.
+
+## Addressed question respondent recovery
+
+An `interaction_response_requested` wake retains the exact `interactionId` from
+its payload across queue persistence. Before dispatch, the server reloads that
+pending `ask_user_questions` card in the same company/task and rechecks the
+current recipient and resolver audience. Missing, malformed, resolved, foreign,
+or human-only cards do not grant an ownership exception. Another pending card
+cannot authorize the request. This path does not reassign the worker's task,
+make the respondent a review participant, or bypass terminality or admission
+gates. An accepted wake, provider execution, saved answer and worker continuation
+remain distinct outcomes. A repeated intention uses its existing idempotency key.
+
+For this request kind, the same agent/task/question/actor and idempotency key
+reuse the original persistent receipt under the issue admission lock, including
+concurrent requests and replay after controller reconstruction. Reusing the key
+for another intention returns a conflict. A terminal run is not automatically
+re-executed; failures still require their supported recovery path. This is not a
+global idempotency change for unrelated wake kinds.

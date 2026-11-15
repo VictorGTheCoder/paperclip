@@ -44,7 +44,7 @@ import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetRead
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isUnstartedTaskQuestionAnswer } from "../../../services/unstarted-task-question-answer.js";
-import { isVerifiedDependencyInteractionResponse } from "../../../services/queued-interaction-response.js";
+import { isVerifiedDependencyInteractionResponse, isVerifiedAgentResponseRequest } from "../../../services/queued-interaction-response.js";
 import { agentBlockingQuestionState } from "../../../services/blocked-question-answer.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { notifyChatRunMilestones } from "../../../services/chat-run-milestone-notifications.js";
@@ -640,7 +640,10 @@ export function createPostgresRunDispatchAdapter(
     );
 
     const wakeCommentId = deriveCommentId(context);
-    const isInteractionWake = allowsIssueInteractionWake(
+    const isAgentInteractionResponseRequest = await isVerifiedAgentResponseRequest(dbOrTx, {
+      companyId: input.companyId, issueId, agentId: input.agentId, runId: input.runId, context,
+    });
+    const isInteractionWake = isAgentInteractionResponseRequest || allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
     );
@@ -736,6 +739,7 @@ export function createPostgresRunDispatchAdapter(
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
+      isAgentInteractionResponseRequest,
       isAuthorizedSourceScopedRecovery,
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,

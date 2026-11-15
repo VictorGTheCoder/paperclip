@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { agentWakeupRequests, issueThreadInteractions, type Db } from "@paperclipai/db";
-import type { IssueComment, IssueQueuedCommentEntry } from "@paperclipai/shared";
+import { isUuidLike, type IssueComment, type IssueQueuedCommentEntry } from "@paperclipai/shared";
+import { evaluateIssueThreadInteractionResolverAudience } from "./issue-thread-interaction-resolution.js";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -84,6 +85,27 @@ export function queuedInteractionSteeringBody(interaction: {
 }
 
 export type QueuedInteractionResponse = NonNullable<Awaited<ReturnType<typeof readQueuedInteractionResponse>>>;
+
+/** A respondent may answer its own addressed question without owning the task.
+ * The wake label alone grants nothing: the pending card and its current audience
+ * are checked again at dispatch. Governed confirmations keep their existing path.
+ */
+export async function isVerifiedAgentResponseRequest(db: Pick<Db, "select">, input: {
+  companyId: string; issueId: string; agentId: string; runId?: string; context: unknown;
+}): Promise<boolean> {
+  const context = record(input.context);
+  if (context.wakeReason !== "interaction_response_requested") return false;
+  if (!isUuidLike(context.interactionId)) return false;
+  const rows = await db.select().from(issueThreadInteractions).where(and(
+    eq(issueThreadInteractions.companyId, input.companyId), eq(issueThreadInteractions.issueId, input.issueId),
+    eq(issueThreadInteractions.addresseeAgentId, input.agentId), eq(issueThreadInteractions.status, "pending"),
+    eq(issueThreadInteractions.kind, "ask_user_questions"),
+    eq(issueThreadInteractions.id, context.interactionId as string),
+  ));
+  return rows.some(interaction => evaluateIssueThreadInteractionResolverAudience({
+    actor: { type: "agent", agentId: input.agentId, runId: input.runId }, interaction,
+  }).allowed);
+}
 
 /** A stored human answer can reach its assignee while dependency work stays blocked. */
 export async function isVerifiedDependencyInteractionResponse(db: Pick<Db, "select">, input: {

@@ -1777,7 +1777,16 @@ function normalizeInteractionContinuationWakeContext(
     }
     return;
   }
+  const requestedInteractionId = contextSnapshot.wakeReason === "interaction_response_requested"
+    ? readNonEmptyString(payload?.interactionId) ?? readNonEmptyString(contextSnapshot.interactionId)
+    : null;
   clearInteractionContinuationWakeContext(contextSnapshot);
+  // A request to answer a still-pending card is not a resolution receipt.
+  // Preserve its exact correlation across queue persistence; dispatch must
+  // revalidate the saved card/audience, never infer authority from this label.
+  if (contextSnapshot.wakeReason === "interaction_response_requested") {
+    if (requestedInteractionId) contextSnapshot.interactionId = requestedInteractionId;
+  }
 }
 
 type AcceptedPlanWakeRoutingDecision = {
