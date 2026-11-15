@@ -95,12 +95,12 @@ export async function isVerifiedAgentResponseRequest(db: Pick<Db, "select">, inp
 }): Promise<boolean> {
   const context = record(input.context);
   if (context.wakeReason !== "interaction_response_requested") return false;
-  if (!isUuidLike(context.interactionId)) return false;
+  if (typeof context.interactionId !== "string" || !isUuidLike(context.interactionId)) return false;
   const rows = await db.select().from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, input.companyId), eq(issueThreadInteractions.issueId, input.issueId),
     eq(issueThreadInteractions.addresseeAgentId, input.agentId), eq(issueThreadInteractions.status, "pending"),
     eq(issueThreadInteractions.kind, "ask_user_questions"),
-    eq(issueThreadInteractions.id, context.interactionId as string),
+    eq(issueThreadInteractions.id, context.interactionId),
   ));
   return rows.some(interaction => evaluateIssueThreadInteractionResolverAudience({
     actor: { type: "agent", agentId: input.agentId, runId: input.runId }, interaction,
