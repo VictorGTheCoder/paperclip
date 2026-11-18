@@ -192,7 +192,10 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await seedIssue({ companyId, issueId, status: "in_review", assigneeAgentId: workerId });
     const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId,
       kind: "ask_user_questions", createdByAgentId: workerId, addresseeAgentId: agentId,
-      effectiveResolverPolicy: "not_creator", payload: { version: 1 } }).returning();
+      effectiveResolverPolicy: "not_creator", payload: { version: 1, questions: [
+        { id: "confirmation", prompt: "Confirm the source revision", selectionMode: "single",
+          options: [{ id: "confirmed", label: "Confirmed" }] },
+      ] } }).returning();
     // Use the actual public-wake context normalization, then rehydrate from
     // persisted JSON as a fresh controller does after a queue wait/restart.
     const contextSnapshot = JSON.parse(JSON.stringify(enrichWakeContextSnapshot({
@@ -240,9 +243,12 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
     // A resolved card, a changed addressee, or a human-only policy revokes the
     // exception; a caller-supplied wake label cannot retain it.
-    for (const patch of [{ status: "answered" }, { status: "pending", addresseeAgentId: workerId },
+    const revocationPatches: Array<Partial<typeof issueThreadInteractions.$inferInsert>> = [
+      { status: "answered" }, { status: "pending", addresseeAgentId: workerId },
       { addresseeAgentId: agentId, effectiveResolverPolicy: "human_only" },
-      { effectiveResolverPolicy: "not_creator", kind: "request_confirmation" }]) {
+      { effectiveResolverPolicy: "not_creator", kind: "request_confirmation" },
+    ];
+    for (const patch of revocationPatches) {
       await db.update(issueThreadInteractions).set(patch).where(eq(issueThreadInteractions.id, card.id));
       const next = await seedRun({ companyId, agentId, contextSnapshot });
       expect(await adapter.cancelStaleQueuedRun({ companyId, runId: next, expectedStatus: "queued", now: new Date() }))

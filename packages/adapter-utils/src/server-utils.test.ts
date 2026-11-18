@@ -4103,6 +4103,128 @@ describe("runtime skill assignment boundaries", () => {
   });
 });
 
+describe("partial native continuation compatibility", () => {
+  it("renders a minimal continuation with no messages array", () => {
+    const wake = {
+      reason: "case_handoff",
+      issue: { id: "task-1", identifier: "TASK-1", title: "Keep work", description: null },
+      comments: [], fallbackFetchNeeded: false,
+      executionContinuation: {
+        version: 1, issueId: "task-1", objective: "Keep the accepted task",
+        resumeDelta: { baseRunId: "prior-run", messages: [] },
+      },
+    };
+    expect(() => renderPaperclipWakePrompt(wake)).not.toThrow();
+    const prompt = renderPaperclipWakePrompt(wake);
+    expect(prompt).toContain("Keep the accepted task");
+    expect(prompt).toContain("INLINE TASK HISTORY IS UNAVAILABLE, NOT EMPTY");
+    expect(prompt).toContain('"kind":"task_history_unavailable"');
+    expect(prompt).toContain('"sourceThreadPath":"/issues/task-1/comments"');
+    expect(prompt).not.toContain("History is complete through the coverage cursor");
+    expect(() => renderPaperclipWakePrompt(wake, { resumedSession: true })).not.toThrow();
+  });
+});
+
+describe("bounded legacy wake history", () => {
+  const message = (id: string, authorType: "user" | "agent", body: string) => ({
+    id, authorType, authorId: authorType === "user" ? "person" : "agent",
+    body, createdAt: "2026-11-18T00:00:00Z", updatedAt: "2026-11-18T00:00:00Z",
+    createdByRunId: null as string | null, deleted: false, sourceTrust: null,
+  });
+  const context = (messages: ReturnType<typeof message>[]) => ({
+    version: 1, issueId: "issue-1", companyId: "company-1",
+    trigger: { reason: "manual", interactionId: null, sourceRunId: null },
+    objective: "Finish the accepted task", originCommentIds: ["human"], messages,
+    humanResponses: [], interactionOutcomes: [], recoveryOutcomes: [], completedActions: [],
+    completedWork: null, unresolvedInteractionIds: [],
+    coverage: { kind: "full_task_history", throughCommentId: messages.at(-1)?.id ?? null,
+      summaryThroughCommentId: null },
+  });
+  const wake = (executionContinuation: ReturnType<typeof context>) => ({
+    reason: "manual", issue: { id: "issue-1", identifier: "TFTAA-1127",
+      title: "Preserve work", description: "Finish the accepted task" },
+    comments: [], fallbackFetchNeeded: false, executionContinuation,
+  });
+
+  it("preserves source instructions and recent evidence without flooding a fresh model turn", () => {
+    const messages = [message("human", "user", "HUMAN_SOURCE_INSTRUCTION_KEEP")];
+    for (let i = 0; i < 1303; i++) messages.push(message(`agent-${i}`, "agent", "old-agent-evidence-" + i + ":" + "x".repeat(800)));
+    const prompt = renderPaperclipWakePrompt(wake(context(messages)));
+    expect(prompt).toContain("HUMAN_SOURCE_INSTRUCTION_KEEP");
+    expect(prompt).toContain("old-agent-evidence-1302");
+    expect(prompt).not.toContain("old-agent-evidence-0:");
+    expect(prompt).toContain("bounded_task_history_excerpt");
+    expect(prompt).toContain("originalMessageCount");
+    expect(prompt).toContain("sourceThreadPath");
+    expect(prompt).toContain("INLINE HISTORY IS BOUNDED, NOT COMPLETE");
+    expect(prompt.length).toBeLessThan(110_000);
+    expect(messages[1]?.body).toContain("old-agent-evidence-0:"); // original evidence not mutated
+  });
+
+  it("remains bounded when many human messages exceed the total budget", () => {
+    const messages = Array.from({ length: 32 }, (_, i) =>
+      message(`human-${i}`, "user", `HUMAN-${i}:` + "u".repeat(18_000)));
+    const prompt = renderPaperclipWakePrompt(wake(context(messages)));
+    expect(prompt).toContain("HUMAN-31:"); // newest instruction is retained
+    expect(prompt).toContain("INLINE HISTORY IS BOUNDED, NOT COMPLETE");
+    expect(prompt).toContain("shortenedMessageCount");
+    expect(prompt.length).toBeLessThan(110_000);
+    expect(messages[0]?.body.length).toBeGreaterThan(18_000); // immutable source evidence
+  });
+
+  it("prioritizes genuine human direction over user-attributed agent-run comments", () => {
+    const trueHuman = message("human-older", "user", "AUTHORIZED_HUMAN_DIRECTION");
+    const attributed = Array.from({ length: 80 }, (_, i) => ({
+      ...message(`run-authored-${i}`, "user", `RUN_OUTPUT_${i}:` + "x".repeat(8_000)),
+      createdByRunId: `run-${i}`,
+    }));
+    const prompt = renderPaperclipWakePrompt(wake(context([trueHuman, ...attributed])));
+    expect(prompt).toContain("AUTHORIZED_HUMAN_DIRECTION");
+    expect(prompt).toContain("bounded_task_history_excerpt");
+    expect(prompt).toContain("RUN_OUTPUT_79:");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+
+  it("explicitly marks truncated resumed delta as incomplete", () => {
+    const history = Array.from({ length: 180 }, (_, i) =>
+      message(`agent-${i}`, "agent", `DELTA-${i}:` + "d".repeat(1200)));
+    const c = { ...context(history), resumeDelta: { baseRunId: "prior-run", messages: history } };
+    const prompt = renderPaperclipWakePrompt(wake(c), { resumedSession: true });
+    expect(prompt).toContain("INLINE RESUME DELTA IS BOUNDED, NOT COMPLETE");
+    expect(prompt).not.toContain("DELTA-0:");
+    expect(prompt).toContain("DELTA-179:");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+
+  it("keeps short complete task history unchanged", () => {
+    const prompt = renderPaperclipWakePrompt(wake(context([
+      message("human", "user", "HUMAN_SOURCE_INSTRUCTION_KEEP"), message("agent-1", "agent", "short result")])));
+    expect(prompt).toContain("full_task_history");
+    expect(prompt).toContain("short result");
+    expect(prompt).not.toContain("bounded_task_history_excerpt");
+  });
+
+  it("does not reintroduce an oversized source objective after bounding messages", () => {
+    const longRequest = "HUMAN_OBJECTIVE:" + "y".repeat(150_000);
+    const source = message("human", "user", longRequest);
+    const c = { ...context([source]), objective: longRequest,
+      objectiveSource: { kind: "comment" as const, id: "human", revision: source.updatedAt } };
+    const prompt = renderPaperclipWakePrompt(wake(c));
+    expect(prompt).toContain("INLINE OBJECTIVE TRUNCATED");
+    expect(prompt).toContain("retrieve the authoritative comment source human");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+
+  it("marks an oversized human message as incomplete and provides a source pointer", () => {
+    const prompt = renderPaperclipWakePrompt(wake(context([
+      message("human", "user", "IMPORTANT_USER_DATA:" + "u".repeat(150_000))])));
+    expect(prompt).toContain("INLINE BODY TRUNCATED");
+    expect(prompt).toContain("retrieve original message human");
+    expect(prompt).toContain("INLINE HISTORY IS BOUNDED, NOT COMPLETE");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+});
+
 describe("wake continuation comment ownership", () => {
   const continuation = (messages: Array<Record<string, unknown>>, resumeDelta?: Array<Record<string, unknown>>) => ({
     version: 1,
