@@ -4150,6 +4150,19 @@ describe("bounded legacy wake history", () => {
     expect(messages[0]?.body.length).toBeGreaterThan(18_000); // immutable source evidence
   });
 
+  it("prioritizes genuine human direction over user-attributed agent-run comments", () => {
+    const trueHuman = message("human-older", "user", "AUTHORIZED_HUMAN_DIRECTION");
+    const attributed = Array.from({ length: 80 }, (_, i) => ({
+      ...message(`run-authored-${i}`, "user", `RUN_OUTPUT_${i}:` + "x".repeat(8_000)),
+      createdByRunId: `run-${i}`,
+    }));
+    const prompt = renderPaperclipWakePrompt(wake(context([trueHuman, ...attributed])));
+    expect(prompt).toContain("AUTHORIZED_HUMAN_DIRECTION");
+    expect(prompt).toContain("bounded_task_history_excerpt");
+    expect(prompt).toContain("RUN_OUTPUT_79:");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+
   it("explicitly marks truncated resumed delta as incomplete", () => {
     const history = Array.from({ length: 180 }, (_, i) =>
       message(`agent-${i}`, "agent", `DELTA-${i}:` + "d".repeat(1200)));
