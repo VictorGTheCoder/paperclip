@@ -4107,7 +4107,7 @@ describe("bounded legacy wake history", () => {
   const message = (id: string, authorType: "user" | "agent", body: string) => ({
     id, authorType, authorId: authorType === "user" ? "person" : "agent",
     body, createdAt: "2026-11-18T00:00:00Z", updatedAt: "2026-11-18T00:00:00Z",
-    createdByRunId: null, deleted: false, sourceTrust: null,
+    createdByRunId: null as string | null, deleted: false, sourceTrust: null,
   });
   const context = (messages: ReturnType<typeof message>[]) => ({
     version: 1, issueId: "issue-1", companyId: "company-1",
