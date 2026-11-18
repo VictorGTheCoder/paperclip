@@ -4103,6 +4103,60 @@ describe("runtime skill assignment boundaries", () => {
   });
 });
 
+describe("bounded legacy wake history", () => {
+  const message = (id: string, authorType: "user" | "agent", body: string) => ({
+    id, authorType, authorId: authorType === "user" ? "person" : "agent",
+    body, createdAt: "2026-11-18T00:00:00Z", updatedAt: "2026-11-18T00:00:00Z",
+    createdByRunId: null, deleted: false, sourceTrust: null,
+  });
+  const context = (messages: ReturnType<typeof message>[]) => ({
+    version: 1, issueId: "issue-1", companyId: "company-1",
+    trigger: { reason: "manual", interactionId: null, sourceRunId: null },
+    objective: "Finish the accepted task", originCommentIds: ["human"], messages,
+    humanResponses: [], interactionOutcomes: [], recoveryOutcomes: [], completedActions: [],
+    completedWork: null, unresolvedInteractionIds: [],
+    coverage: { kind: "full_task_history", throughCommentId: messages.at(-1)?.id ?? null,
+      summaryThroughCommentId: null },
+  });
+  const wake = (executionContinuation: ReturnType<typeof context>) => ({
+    reason: "manual", issue: { id: "issue-1", identifier: "TFTAA-1127",
+      title: "Preserve work", description: "Finish the accepted task" },
+    comments: [], fallbackFetchNeeded: false, executionContinuation,
+  });
+
+  it("preserves source instructions and recent evidence without flooding a fresh model turn", () => {
+    const messages = [message("human", "user", "HUMAN_SOURCE_INSTRUCTION_KEEP")];
+    for (let i = 0; i < 1303; i++) messages.push(message(`agent-${i}`, "agent", "old-agent-evidence-" + i + ":" + "x".repeat(800)));
+    const prompt = renderPaperclipWakePrompt(wake(context(messages)));
+    expect(prompt).toContain("HUMAN_SOURCE_INSTRUCTION_KEEP");
+    expect(prompt).toContain("old-agent-evidence-1302");
+    expect(prompt).not.toContain("old-agent-evidence-0:");
+    expect(prompt).toContain("bounded_task_history_excerpt");
+    expect(prompt).toContain("originalMessageCount");
+    expect(prompt).toContain("sourceThreadPath");
+    expect(prompt).toContain("INLINE HISTORY IS BOUNDED, NOT COMPLETE");
+    expect(prompt.length).toBeLessThan(110_000);
+    expect(messages[1]?.body).toContain("old-agent-evidence-0:"); // original evidence not mutated
+  });
+
+  it("keeps short complete task history unchanged", () => {
+    const prompt = renderPaperclipWakePrompt(wake(context([
+      message("human", "user", "HUMAN_SOURCE_INSTRUCTION_KEEP"), message("agent-1", "agent", "short result")])));
+    expect(prompt).toContain("full_task_history");
+    expect(prompt).toContain("short result");
+    expect(prompt).not.toContain("bounded_task_history_excerpt");
+  });
+
+  it("marks an oversized human message as incomplete and provides a source pointer", () => {
+    const prompt = renderPaperclipWakePrompt(wake(context([
+      message("human", "user", "IMPORTANT_USER_DATA:" + "u".repeat(150_000))])));
+    expect(prompt).toContain("INLINE BODY TRUNCATED");
+    expect(prompt).toContain("retrieve original message human");
+    expect(prompt).toContain("INLINE HISTORY IS BOUNDED, NOT COMPLETE");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+});
+
 describe("wake continuation comment ownership", () => {
   const continuation = (messages: Array<Record<string, unknown>>, resumeDelta?: Array<Record<string, unknown>>) => ({
     version: 1,
