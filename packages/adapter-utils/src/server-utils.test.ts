@@ -4115,7 +4115,12 @@ describe("partial native continuation compatibility", () => {
       },
     };
     expect(() => renderPaperclipWakePrompt(wake)).not.toThrow();
-    expect(renderPaperclipWakePrompt(wake)).toContain("Keep the accepted task");
+    const prompt = renderPaperclipWakePrompt(wake);
+    expect(prompt).toContain("Keep the accepted task");
+    expect(prompt).toContain("INLINE TASK HISTORY IS UNAVAILABLE, NOT EMPTY");
+    expect(prompt).toContain('"kind":"task_history_unavailable"');
+    expect(prompt).toContain('"sourceThreadPath":"/issues/task-1/comments"');
+    expect(prompt).not.toContain("History is complete through the coverage cursor");
     expect(() => renderPaperclipWakePrompt(wake, { resumedSession: true })).not.toThrow();
   });
 });
