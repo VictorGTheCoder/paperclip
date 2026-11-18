@@ -192,7 +192,10 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await seedIssue({ companyId, issueId, status: "in_review", assigneeAgentId: workerId });
     const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId,
       kind: "ask_user_questions", createdByAgentId: workerId, addresseeAgentId: agentId,
-      effectiveResolverPolicy: "not_creator", payload: { version: 1 } }).returning();
+      effectiveResolverPolicy: "not_creator", payload: { version: 1, questions: [
+        { id: "confirmation", prompt: "Confirm the source revision", selectionMode: "single",
+          options: [{ id: "confirmed", label: "Confirmed" }] },
+      ] } }).returning();
     // Use the actual public-wake context normalization, then rehydrate from
     // persisted JSON as a fresh controller does after a queue wait/restart.
     const contextSnapshot = JSON.parse(JSON.stringify(enrichWakeContextSnapshot({
