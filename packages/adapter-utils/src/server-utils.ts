@@ -2597,7 +2597,7 @@ function renderPaperclipWakePromptBody(
     // authoritative history in Paperclip, but don't inline its entirety into a
     // fresh provider turn. Human direction and source-origin messages get
     // priority; recent lower-trust evidence is included as budget permits.
-    const originalHistory = continuation.messages;
+    const originalHistory = Array.isArray(continuation.messages) ? continuation.messages : [];
     const historyTooLarge = JSON.stringify(originalHistory).length > 96_000;
     const originIds = new Set(continuation.originCommentIds);
     if (continuation.objectiveSource?.kind === "comment") originIds.add(continuation.objectiveSource.id);
@@ -2662,7 +2662,7 @@ function renderPaperclipWakePromptBody(
           : "History is complete through the coverage cursor. Prefer source messages over summaries.",
       "humanResponses contains server-verified user answers and decisions; apply each only to its question or approval scope.");
     const earlierRead = normalized.comments.filter((comment) => comment.readByEarlierTurn && comment.id
-      && continuation.messages.some((message) => message.id === comment.id && !message.deleted)).map((comment) => comment.id);
+      && originalHistory.some((message) => message.id === comment.id && !message.deleted)).map((comment) => comment.id);
     if (earlierRead.length > 0) {
       lines.push(`Messages ${earlierRead.join(", ")}: ${PAPERCLIP_EARLIER_READ_COMMENT_NOTE}`);
     }

@@ -4103,6 +4103,23 @@ describe("runtime skill assignment boundaries", () => {
   });
 });
 
+describe("partial native continuation compatibility", () => {
+  it("renders a minimal continuation with no messages array", () => {
+    const wake = {
+      reason: "case_handoff",
+      issue: { id: "task-1", identifier: "TASK-1", title: "Keep work", description: null },
+      comments: [], fallbackFetchNeeded: false,
+      executionContinuation: {
+        version: 1, issueId: "task-1", objective: "Keep the accepted task",
+        resumeDelta: { baseRunId: "prior-run", messages: [] },
+      },
+    };
+    expect(() => renderPaperclipWakePrompt(wake)).not.toThrow();
+    expect(renderPaperclipWakePrompt(wake)).toContain("Keep the accepted task");
+    expect(() => renderPaperclipWakePrompt(wake, { resumedSession: true })).not.toThrow();
+  });
+});
+
 describe("bounded legacy wake history", () => {
   const message = (id: string, authorType: "user" | "agent", body: string) => ({
     id, authorType, authorId: authorType === "user" ? "person" : "agent",
