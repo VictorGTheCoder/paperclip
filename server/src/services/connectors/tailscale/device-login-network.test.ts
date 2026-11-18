@@ -31,9 +31,14 @@ if (args[1] === 'up') {
   if (state.BackendState === 'Running') process.exit(0);
   state = { MachineKey: state.MachineKey || path.basename(dir), BackendState: 'NeedsLogin', AuthURL: 'https://login.tailscale.com/a/fixture' };
   fs.writeFileSync(statePath, JSON.stringify(state));
-  fs.watch(dir, () => {
-    if (JSON.parse(fs.readFileSync(statePath, 'utf8')).BackendState === 'Running') process.exit(0);
-  });
+  const exitIfAuthorized = () => {
+    try {
+      if (JSON.parse(fs.readFileSync(statePath, 'utf8')).BackendState === 'Running') process.exit(0);
+    } catch { /* A concurrent write may be in progress; the next event retries. */ }
+  };
+  fs.watch(dir, exitIfAuthorized);
+  // A login transition may occur before the watcher subscribes. Recheck it.
+  exitIfAuthorized();
 } else if (args[1] === 'status') console.log(JSON.stringify(state));
 `, { mode: 0o700 });
     manager = createTailscaleNetworkManager({ daemon: path.join(dir, "daemon"), cli: path.join(dir, "cli") });
