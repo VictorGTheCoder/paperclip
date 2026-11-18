@@ -4139,12 +4139,45 @@ describe("bounded legacy wake history", () => {
     expect(messages[1]?.body).toContain("old-agent-evidence-0:"); // original evidence not mutated
   });
 
+  it("remains bounded when many human messages exceed the total budget", () => {
+    const messages = Array.from({ length: 32 }, (_, i) =>
+      message(`human-${i}`, "user", `HUMAN-${i}:` + "u".repeat(18_000)));
+    const prompt = renderPaperclipWakePrompt(wake(context(messages)));
+    expect(prompt).toContain("HUMAN-31:"); // newest instruction is retained
+    expect(prompt).toContain("INLINE HISTORY IS BOUNDED, NOT COMPLETE");
+    expect(prompt).toContain("shortenedMessageCount");
+    expect(prompt.length).toBeLessThan(110_000);
+    expect(messages[0]?.body.length).toBeGreaterThan(18_000); // immutable source evidence
+  });
+
+  it("explicitly marks truncated resumed delta as incomplete", () => {
+    const history = Array.from({ length: 180 }, (_, i) =>
+      message(`agent-${i}`, "agent", `DELTA-${i}:` + "d".repeat(1200)));
+    const c = { ...context(history), resumeDelta: { baseRunId: "prior-run", messages: history } };
+    const prompt = renderPaperclipWakePrompt(wake(c), { resumedSession: true });
+    expect(prompt).toContain("INLINE RESUME DELTA IS BOUNDED, NOT COMPLETE");
+    expect(prompt).not.toContain("DELTA-0:");
+    expect(prompt).toContain("DELTA-179:");
+    expect(prompt.length).toBeLessThan(110_000);
+  });
+
   it("keeps short complete task history unchanged", () => {
     const prompt = renderPaperclipWakePrompt(wake(context([
       message("human", "user", "HUMAN_SOURCE_INSTRUCTION_KEEP"), message("agent-1", "agent", "short result")])));
     expect(prompt).toContain("full_task_history");
     expect(prompt).toContain("short result");
     expect(prompt).not.toContain("bounded_task_history_excerpt");
+  });
+
+  it("does not reintroduce an oversized source objective after bounding messages", () => {
+    const longRequest = "HUMAN_OBJECTIVE:" + "y".repeat(150_000);
+    const source = message("human", "user", longRequest);
+    const c = { ...context([source]), objective: longRequest,
+      objectiveSource: { kind: "comment" as const, id: "human", revision: source.updatedAt } };
+    const prompt = renderPaperclipWakePrompt(wake(c));
+    expect(prompt).toContain("INLINE OBJECTIVE TRUNCATED");
+    expect(prompt).toContain("retrieve the authoritative comment source human");
+    expect(prompt.length).toBeLessThan(110_000);
   });
 
   it("marks an oversized human message as incomplete and provides a source pointer", () => {
